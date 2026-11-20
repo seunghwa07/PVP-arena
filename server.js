@@ -7,9 +7,9 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const W = 2000, H = 1200;         // 경기장 크기 (클라이언트는 1400x800 초과 시 캐릭터 추적 카메라 사용)
+const W = 3200, H = 2000;         // 경기장 크기 (클라이언트는 1400x800 초과 시 캐릭터 추적 카메라 사용)
 const PR = 18;                    // 플레이어 반지름
-const BASE_SPEED = 235;
+const BASE_SPEED = 260;
 const MAX_HP = 100;
 const MAX_PLAYERS = 4;
 const WIN_ROUNDS = 3;             // 3라운드 선승
@@ -20,37 +20,42 @@ const ATK = {
   hCd: 620, hRange: 78, hArc: 2.6, hDmg: 22, hKb: 380,
   comboWindow: 800,
 };
-// 자기장: 전투 시작 15초 뒤부터 60초에 걸쳐 중앙으로 줄어듦. 밖에 있으면 초당 8 피해
-const ZONE = { delay: 15, shrink: 60, fw: 520, fh: 340, dps: 8 };
+// 자기장: 전투 시작 15초 뒤부터 80초에 걸쳐 중앙으로 줄어듦. 밖에 있으면 초당 8 피해
+const ZONE = { delay: 15, shrink: 80, fw: 560, fh: 380, dps: 8 };
 
 // ---------- 능력 정의 (클라이언트에도 전달) ----------
 const SKILLS = {
-  dash:   { name: '돌진 베기', icon: '💨', cd: 5000, desc: '돌진하며 부딪힌 적에게 22 피해 + 밀쳐냄' },
+  dash:   { name: '돌진 베기', icon: '💨', cd: 5000, desc: '가까운 적에게 돌진하며 22 피해 + 밀쳐냄' },
   whirl:  { name: '회전 베기', icon: '🌪️', cd: 4500, desc: '주변 360° 16 피해 + 밀쳐냄' },
   slam:   { name: '대지 강타', icon: '🔨', cd: 7000, desc: '내려쳐 20 피해, 크게 밀쳐내고 0.6초 기절' },
   parry:  { name: '받아치기', icon: '⚔️', cd: 5000, desc: '0.45초 안에 맞으면 무효, 공격자 1초 기절' },
   shield: { name: '방어막', icon: '🛡️', cd: 9000, desc: '1.8초간 모든 피해 무효' },
-  blink:  { name: '순간이동', icon: '🌀', cd: 4000, desc: '조준 방향으로 순간 이동' },
+  blink:  { name: '순간이동', icon: '🌀', cd: 4000, desc: '이동하는 방향으로 순간 이동 (가만히 있으면 적의 반대로)' },
   heal:   { name: '치유', icon: '💚', cd: 10000, desc: '체력 30 회복' },
-  throw:  { name: '단검 투척', icon: '🗡️', cd: 2500, desc: '단검을 던져 14 피해 (사거리 짧음)' },
+  throw:  { name: '단검 투척', icon: '🗡️', cd: 2500, desc: '가까운 적에게 단검을 던져 14 피해' },
   nova:   { name: '서리 폭발', icon: '❄️', cd: 6000, desc: '주변 적에게 10 피해 + 2.5초 둔화' },
 };
 const SKILL_IDS = Object.keys(SKILLS);
 const SKILL_META = SKILL_IDS.map(id => ({ id, ...SKILLS[id] }));
 
-// 좌우/상하 대칭 배치
-const WALLS = [
-  { x: 900, y: 520, w: 200, h: 160 },                                   // 중앙 요새
-  { x: 760, y: 240, w: 480, h: 30 }, { x: 760, y: 930, w: 480, h: 30 }, // 위/아래 긴 벽
-  { x: 500, y: 510, w: 30, h: 180 }, { x: 1470, y: 510, w: 30, h: 180 },// 좌/우 세로 벽
-  { x: 300, y: 260, w: 160, h: 30 }, { x: 300, y: 260, w: 30, h: 160 }, // 좌상 ㄱ자
-  { x: 1540, y: 260, w: 160, h: 30 }, { x: 1670, y: 260, w: 30, h: 160 },
-  { x: 300, y: 910, w: 160, h: 30 }, { x: 300, y: 780, w: 30, h: 160 },
-  { x: 1540, y: 910, w: 160, h: 30 }, { x: 1670, y: 780, w: 30, h: 160 },
-  { x: 700, y: 420, w: 60, h: 60 }, { x: 1240, y: 420, w: 60, h: 60 },  // 기둥
-  { x: 700, y: 720, w: 60, h: 60 }, { x: 1240, y: 720, w: 60, h: 60 },
+// 왼쪽 위 1/4만 정의하고 좌우/상하로 대칭 복제 (+ 중앙 요새)
+const QUAD = [
+  { x: 360, y: 300, w: 220, h: 34 }, { x: 360, y: 300, w: 34, h: 220 },   // ㄱ자 엄폐물
+  { x: 800, y: 200, w: 34, h: 260 },
+  { x: 1100, y: 120, w: 400, h: 34 },                                       // 위쪽 긴 벽
+  { x: 1000, y: 420, w: 240, h: 34 },
+  { x: 600, y: 700, w: 34, h: 240 },
+  { x: 880, y: 620, w: 70, h: 70 }, { x: 1250, y: 720, w: 70, h: 70 }, { x: 1380, y: 280, w: 70, h: 70 }, // 기둥
+  { x: 1160, y: 860, w: 200, h: 34 },
 ];
-const SPAWNS = [[120, 120], [W - 120, H - 120], [W - 120, 120], [120, H - 120]];
+const WALLS = [{ x: 1450, y: 880, w: 300, h: 240 }];                        // 중앙 요새
+for (const q of QUAD) {
+  WALLS.push(q);
+  WALLS.push({ x: W - q.x - q.w, y: q.y, w: q.w, h: q.h });
+  WALLS.push({ x: q.x, y: H - q.y - q.h, w: q.w, h: q.h });
+  WALLS.push({ x: W - q.x - q.w, y: H - q.y - q.h, w: q.w, h: q.h });
+}
+const SPAWNS = [[140, 140], [W - 140, H - 140], [W - 140, 140], [140, H - 140]];
 
 // ---------- 수학 / 충돌 ----------
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -637,7 +642,19 @@ class Room {
 
   act(p, now) {
     if (p.stunUntil > now) return;
-    if (p.fire && now >= p.cd[0]) this.swing(p, now);
+    let want = p.fire;
+    if (!p.isBot) {
+      // 자동 공격: 가장 가까운 적을 바라보고, 사거리 안이면 알아서 벤다
+      let t = null, bd = Infinity;
+      for (const q of this.players) {
+        if (q === p || !q.alive) continue;
+        const d2 = dist2(p, q);
+        if (d2 < bd) { bd = d2; t = q; }
+      }
+      if (t) p.aim = Math.atan2(t.y - p.y, t.x - p.x);
+      want = !!t && bd <= (ATK.range + PR) ** 2 && !rayBlocked(p.x, p.y, t.x, t.y);
+    }
+    if (want && now >= p.cd[0]) this.swing(p, now);
     for (let s = 1; s <= 2; s++) {
       const pressed = s === 1 ? p.s1 : p.s2;
       const sid = p.skills[s - 1];
@@ -697,9 +714,12 @@ class Room {
         p.shieldUntil = now + 1800;
         return true;
       case 'blink': {
+        let ba = p.aim;
+        if (!p.isBot) ba = (p.mx || p.my) ? Math.atan2(p.my, p.mx) : p.aim + Math.PI;
+        const bx = Math.cos(ba), by = Math.sin(ba);
         let nx = p.x, ny = p.y;
         for (let d = 6; d <= 220; d += 6) {
-          const tx = p.x + dx * d, ty = p.y + dy * d;
+          const tx = p.x + bx * d, ty = p.y + by * d;
           if (blocked(tx, ty, PR)) break;
           nx = tx; ny = ty;
         }
