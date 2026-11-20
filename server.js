@@ -1,44 +1,61 @@
 'use strict';
 // 능력 대전 아레나 - 서버 (외부 패키지 없이 동작: 내장 WebSocket 구현)
+// 근접 전투판: 큰 맵 + 콤보 베기 + 넉백/기절 + 줄어드는 자기장
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const W = 1000, H = 600;          // 경기장 크기
+const W = 2000, H = 1200;         // 경기장 크기 (클라이언트는 1400x800 초과 시 캐릭터 추적 카메라 사용)
 const PR = 18;                    // 플레이어 반지름
-const BASE_SPEED = 230;
+const BASE_SPEED = 235;
 const MAX_HP = 100;
 const MAX_PLAYERS = 4;
 const WIN_ROUNDS = 3;             // 3라운드 선승
 
+// 기본 공격: 3연타 콤보 (3타째는 강타)
+const ATK = {
+  cd: 380, range: 64, arc: 2.0, dmg: 12, kb: 170,
+  hCd: 620, hRange: 78, hArc: 2.6, hDmg: 22, hKb: 380,
+  comboWindow: 800,
+};
+// 자기장: 전투 시작 15초 뒤부터 60초에 걸쳐 중앙으로 줄어듦. 밖에 있으면 초당 8 피해
+const ZONE = { delay: 15, shrink: 60, fw: 520, fh: 340, dps: 8 };
+
 // ---------- 능력 정의 (클라이언트에도 전달) ----------
 const SKILLS = {
-  fireball: { name: '화염구', icon: '🔥', cd: 3000, desc: '폭발하는 불덩이. 직격 28 + 주변 14' },
-  nova:     { name: '서리 폭발', icon: '❄️', cd: 6000, desc: '주변 적에게 10 피해 + 2.5초 둔화' },
-  bolt:     { name: '번개', icon: '⚡', cd: 4000, desc: '벽까지 닿는 즉발 광선 26 피해' },
-  blink:    { name: '순간이동', icon: '🌀', cd: 4000, desc: '조준 방향으로 순간 이동' },
-  shield:   { name: '방어막', icon: '🛡️', cd: 9000, desc: '1.8초간 모든 피해 무효' },
-  dash:     { name: '돌진', icon: '💨', cd: 5000, desc: '돌진하며 부딪힌 적에게 20 피해' },
-  mine:     { name: '지뢰', icon: '💣', cd: 6000, desc: '지뢰 설치. 적이 밟으면 40 폭발' },
-  heal:     { name: '치유', icon: '💚', cd: 10000, desc: '체력 30 회복' },
+  dash:   { name: '돌진 베기', icon: '💨', cd: 5000, desc: '돌진하며 부딪힌 적에게 22 피해 + 밀쳐냄' },
+  whirl:  { name: '회전 베기', icon: '🌪️', cd: 4500, desc: '주변 360° 16 피해 + 밀쳐냄' },
+  slam:   { name: '대지 강타', icon: '🔨', cd: 7000, desc: '내려쳐 20 피해, 크게 밀쳐내고 0.6초 기절' },
+  parry:  { name: '받아치기', icon: '⚔️', cd: 5000, desc: '0.45초 안에 맞으면 무효, 공격자 1초 기절' },
+  shield: { name: '방어막', icon: '🛡️', cd: 9000, desc: '1.8초간 모든 피해 무효' },
+  blink:  { name: '순간이동', icon: '🌀', cd: 4000, desc: '조준 방향으로 순간 이동' },
+  heal:   { name: '치유', icon: '💚', cd: 10000, desc: '체력 30 회복' },
+  throw:  { name: '단검 투척', icon: '🗡️', cd: 2500, desc: '단검을 던져 14 피해 (사거리 짧음)' },
+  nova:   { name: '서리 폭발', icon: '❄️', cd: 6000, desc: '주변 적에게 10 피해 + 2.5초 둔화' },
 };
 const SKILL_IDS = Object.keys(SKILLS);
 const SKILL_META = SKILL_IDS.map(id => ({ id, ...SKILLS[id] }));
 
+// 좌우/상하 대칭 배치
 const WALLS = [
-  { x: 440, y: 230, w: 120, h: 140 },
-  { x: 180, y: 100, w: 30, h: 130 },
-  { x: 790, y: 370, w: 30, h: 130 },
-  { x: 180, y: 400, w: 130, h: 30 },
-  { x: 690, y: 170, w: 130, h: 30 },
+  { x: 900, y: 520, w: 200, h: 160 },                                   // 중앙 요새
+  { x: 760, y: 240, w: 480, h: 30 }, { x: 760, y: 930, w: 480, h: 30 }, // 위/아래 긴 벽
+  { x: 500, y: 510, w: 30, h: 180 }, { x: 1470, y: 510, w: 30, h: 180 },// 좌/우 세로 벽
+  { x: 300, y: 260, w: 160, h: 30 }, { x: 300, y: 260, w: 30, h: 160 }, // 좌상 ㄱ자
+  { x: 1540, y: 260, w: 160, h: 30 }, { x: 1670, y: 260, w: 30, h: 160 },
+  { x: 300, y: 910, w: 160, h: 30 }, { x: 300, y: 780, w: 30, h: 160 },
+  { x: 1540, y: 910, w: 160, h: 30 }, { x: 1670, y: 780, w: 30, h: 160 },
+  { x: 700, y: 420, w: 60, h: 60 }, { x: 1240, y: 420, w: 60, h: 60 },  // 기둥
+  { x: 700, y: 720, w: 60, h: 60 }, { x: 1240, y: 720, w: 60, h: 60 },
 ];
-const SPAWNS = [[80, 80], [920, 520], [920, 80], [80, 520]];
+const SPAWNS = [[120, 120], [W - 120, H - 120], [W - 120, 120], [120, H - 120]];
 
 // ---------- 수학 / 충돌 ----------
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const dist2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 
 function hitsWall(x, y, r) {
   for (const w of WALLS) {
@@ -95,12 +112,12 @@ function steer(x, y, ang, side) {
   return ang;
 }
 
-// 봇 난이도: err=조준 오차(rad), think=조준 갱신 주기(ms), dodge=회피 확률, skill=틱당 능력 사용 확률,
-// burst=[발사 ms, 휴식 ms], lead=이동 예측 사격, dist=선호 교전 거리
+// 봇 난이도: err=조준 오차(rad), think=조준 갱신 주기(ms), dodge=투척 회피 확률, skill=틱당 능력 사용 확률,
+// burst=[공격 ms, 휴식 ms], lead=이동 예측, dist=선호 교전 거리, retreat=간격 조절(치고 빠지기)
 const DIFF = {
-  easy:   { err: 0.32, think: 380, dodge: 0,    skill: 0.03, burst: [800, 1300], lead: false, dist: 300 },
-  normal: { err: 0.14, think: 200, dodge: 0.45, skill: 0.10, burst: [1600, 500], lead: true,  dist: 260 },
-  hard:   { err: 0.04, think: 90,  dodge: 1,    skill: 0.30, burst: null,        lead: true,  dist: 230 },
+  easy:   { err: 0.32, think: 380, dodge: 0,    skill: 0.03, burst: [800, 1300], lead: false, dist: 40, retreat: false },
+  normal: { err: 0.14, think: 200, dodge: 0.45, skill: 0.10, burst: [1600, 500], lead: true,  dist: 55, retreat: false },
+  hard:   { err: 0.04, think: 90,  dodge: 1,    skill: 0.30, burst: null,        lead: true,  dist: 72, retreat: true },
 };
 
 // ---------- WebSocket (RFC 6455 최소 구현) ----------
@@ -315,10 +332,10 @@ class Room {
     this.phaseEnd = 0;
     this.round = 0;
     this.projs = [];
-    this.mines = [];
     this.ev = [];
     this.last = Date.now();
     this.now = Date.now();
+    this.fightAt = 0;
     this.solo = false;
     this.diff = 'normal';
   }
@@ -367,15 +384,18 @@ class Room {
     this.startRound();
   }
   startRound() {
-    this.projs = []; this.mines = []; this.ev = [];
-    this.players.forEach((p, i) => {
+    this.projs = []; this.ev = [];
+    this.fightAt = 0;
+    this.players.forEach(p => {
       const s = SPAWNS[p.slot % SPAWNS.length];
       p.x = s[0]; p.y = s[1];
       p.hp = MAX_HP; p.alive = true;
       p.cd = [0, 0, 0];
       p.shieldUntil = 0; p.slowUntil = 0; p.dash = null;
+      p.stunUntil = 0; p.parryUntil = 0; p.kv = null; p.atkSlowUntil = 0;
+      p.combo = 0; p.comboUntil = 0;
       p.mx = p.my = 0; p.fire = p.s1 = p.s2 = false;
-      p.aim = (p.x < W / 2) ? 0 : Math.PI;
+      p.aim = Math.atan2(H / 2 - p.y, W / 2 - p.x);
       if (p.isBot) p.ai = newAi();
     });
     this.phase = 'countdown';
@@ -386,7 +406,7 @@ class Room {
   toLobby(text) {
     this.phase = 'lobby';
     this.round = 0;
-    this.projs = []; this.mines = []; this.ev = [];
+    this.projs = []; this.ev = [];
     for (const p of this.players) {
       p.ready = !!p.isBot; p.wins = 0;
       if (p.isBot) p.skills = randomSkills();
@@ -410,6 +430,14 @@ class Room {
     }
   }
 
+  // 현재 안전지대 [x1, y1, x2, y2]
+  zone(now) {
+    if (!this.fightAt) return [0, 0, W, H];
+    const k = clamp(((now - this.fightAt) / 1000 - ZONE.delay) / ZONE.shrink, 0, 1);
+    const x0 = W / 2 - ZONE.fw / 2, y0 = H / 2 - ZONE.fh / 2, x1 = W / 2 + ZONE.fw / 2, y1 = H / 2 + ZONE.fh / 2;
+    return [x0 * k, y0 * k, W + (x1 - W) * k, H + (y1 - H) * k];
+  }
+
   tick(now) {
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
@@ -418,7 +446,7 @@ class Room {
       for (const p of this.players) if (p.isBot) { p.mx = p.my = 0; p.fire = p.s1 = p.s2 = false; }
     }
     if (this.phase === 'countdown') {
-      if (now >= this.phaseEnd) { this.phase = 'fight'; this.broadcastRoom(); }
+      if (now >= this.phaseEnd) { this.phase = 'fight'; this.fightAt = now; this.broadcastRoom(); }
     } else if (this.phase === 'fight') {
       for (const p of this.players) if (p.isBot) this.botThink(p, now);
       this.simulate(now, dt, true);
@@ -446,16 +474,16 @@ class Room {
     if (now >= ai.nextThink) { ai.nextThink = now + D.think * (1 + Math.random() * 0.3); ai.err = (Math.random() * 2 - 1) * D.err; }
     if (now >= ai.sideUntil) { ai.side = Math.random() < 0.5 ? 1 : -1; ai.sideUntil = now + 1500 + Math.random() * 1500; }
 
-    // 조준 (보통 이상은 상대 이동 방향을 예측)
+    // 조준 (보통 이상은 상대 이동 방향을 조금 앞서 노림)
     let tx = t.x, ty = t.y;
     if (D.lead) {
-      const tt = d / 700, spd = BASE_SPEED * (t.slowUntil > now ? 0.5 : 1) * 0.8;
-      tx += (t.mx || 0) * spd * tt; ty += (t.my || 0) * spd * tt;
+      const spd = BASE_SPEED * (t.slowUntil > now ? 0.5 : 1);
+      tx += (t.mx || 0) * spd * 0.12; ty += (t.my || 0) * spd * 0.12;
     }
     const ang = Math.atan2(t.y - b.y, t.x - b.x);
     const aim = Math.atan2(ty - b.y, tx - b.x) + ai.err;
 
-    // 날아오는 투사체 감지
+    // 날아오는 단검 감지
     let threat = false, threatAng = 0;
     for (const pj of this.projs) {
       if (pj.owner === b.id) continue;
@@ -475,11 +503,17 @@ class Room {
       if (Math.random() < D.dodge) { ai.dodgeUntil = now + 280; ai.dodgeAng = threatAng; }
     }
 
-    // 이동: 접근 / 후퇴 / 좌우 이동
+    // 자기장이 줄어들었다면 가장자리에서 중앙으로 복귀
+    const z = this.zone(now);
+    const shrunk = z[0] > 1;
+    const zoneRush = shrunk && (b.x < z[0] + 70 || b.x > z[2] - 70 || b.y < z[1] + 70 || b.y > z[3] - 70);
+
+    // 이동: 접근 / 간격 조절 / 좌우 이동
     let mv;
     if (ai.dodgeUntil > now) mv = ai.dodgeAng;
-    else if (d > D.dist + 50 || !los) mv = ang;
-    else if (d < D.dist - 70) mv = ang + Math.PI;
+    else if (zoneRush) mv = Math.atan2(H / 2 - b.y, W / 2 - b.x);
+    else if (d > D.dist + 25 || !los) mv = ang;
+    else if (D.retreat && d < D.dist - 30) mv = ang + Math.PI;
     else {
       if (now >= ai.strafeUntil) { ai.strafe = Math.random() < 0.5 ? 1 : -1; ai.strafeUntil = now + 800 + Math.random() * 1200; }
       mv = ang + ai.strafe * Math.PI / 2;
@@ -487,8 +521,8 @@ class Room {
     mv = steer(b.x, b.y, mv, ai.side);
     b.mx = Math.cos(mv); b.my = Math.sin(mv);
 
-    // 기본 공격 (쉬움/보통은 끊어서 사격)
-    let fire = los && d < 560;
+    // 기본 공격 (쉬움/보통은 끊어서 휘두름)
+    let fire = los && d < ATK.range + PR + 8;
     if (D.burst) {
       if (now >= ai.fireUntil) {
         ai.fireOn = !ai.fireOn;
@@ -502,14 +536,15 @@ class Room {
     const roll = () => Math.random() < D.skill;
     const want = sid => {
       switch (sid) {
-        case 'fireball': return los && d < 480 && d > 90 && roll();
-        case 'bolt': return los && d < 500 && roll();
-        case 'nova': return d < 150 && roll();
-        case 'dash': return los && d > 100 && d < 300 && roll();
-        case 'blink': return (d < 110 || hpr < 0.35) && roll();
-        case 'shield': return (threat || (los && d < 200 && hpr < 0.5)) && roll();
-        case 'mine': return d < 320 && roll();
-        case 'heal': return hpr <= 0.65 && roll();
+        case 'dash': return los && d > 120 && d < 320 && roll();
+        case 'whirl': return d < 90 && roll();
+        case 'slam': return d < 105 && roll();
+        case 'parry': return (threat || d < 100) && Math.random() < D.skill * 0.6;
+        case 'shield': return (threat || (los && d < 120 && hpr < 0.5)) && roll();
+        case 'blink': return ((d < 90 && hpr < 0.35) || zoneRush) && roll();
+        case 'heal': return hpr <= 0.6 && roll();
+        case 'throw': return los && d > 130 && d < 520 && roll();
+        case 'nova': return d < 140 && roll();
         default: return false;
       }
     };
@@ -517,8 +552,8 @@ class Room {
     let aimOut = aim;
     for (let i = 0; i < 2; i++) {
       if (b.skills[i] === 'blink' && f[i]) {
-        // 순간이동은 적에게서 멀어지는 방향으로
-        aimOut = steer(b.x, b.y, ang + Math.PI, ai.side);
+        // 순간이동: 자기장 밖이면 중앙으로, 아니면 적에게서 멀어지는 방향으로
+        aimOut = zoneRush ? Math.atan2(H / 2 - b.y, W / 2 - b.x) : steer(b.x, b.y, ang + Math.PI, ai.side);
         fire = false;
         f = [i === 0, i === 1];
       }
@@ -533,13 +568,21 @@ class Room {
       if (p.dash && now < p.dash.until) {
         p.x += p.dash.vx * dt; p.y += p.dash.vy * dt;
         for (const q of ps) {
+          if (!p.dash) break; // 받아치기로 돌진이 끊긴 경우
           if (q === p || !q.alive || p.dash.hit.has(q.id)) continue;
-          if (dist2(p, q) < (PR * 2 + 4) ** 2) { p.dash.hit.add(q.id); this.damage(q, 20, p.id); }
+          if (dist2(p, q) < (PR * 2 + 4) ** 2) {
+            p.dash.hit.add(q.id);
+            this.damage(q, 22, p.id, { x: p.x, y: p.y, p: 380 });
+          }
         }
       } else {
         p.dash = null;
-        const spd = BASE_SPEED * (p.slowUntil > now ? 0.5 : 1);
+        let spd = BASE_SPEED * (p.slowUntil > now ? 0.5 : 1) * (p.atkSlowUntil > now ? 0.55 : 1);
+        if (p.stunUntil > now) spd = 0;
         p.x += p.mx * spd * dt; p.y += p.my * spd * dt;
+      }
+      if (p.kv) {
+        if (now < p.kv.until) { p.x += p.kv.vx * dt; p.y += p.kv.vy * dt; } else p.kv = null;
       }
       pushOutWalls(p);
       p.x = clamp(p.x, PR, W - PR); p.y = clamp(p.y, PR, H - PR);
@@ -555,22 +598,34 @@ class Room {
         b.x += dx / d * push; b.y += dy / d * push;
       }
     }
-    if (canAct) for (const p of ps) if (p.alive) this.act(p, now);
+    if (canAct) {
+      for (const p of ps) if (p.alive) this.act(p, now);
+      // 자기장 밖 피해
+      const z = this.zone(now);
+      for (const p of ps) {
+        if (!p.alive) continue;
+        if (p.x < z[0] || p.x > z[2] || p.y < z[1] || p.y > z[3]) {
+          p.hp -= ZONE.dps * dt;
+          if (p.hp <= 0) {
+            p.hp = 0; p.alive = false;
+            this.ev.push({ k: 'die', x: Math.round(p.x), y: Math.round(p.y) });
+          }
+        }
+      }
+    }
 
-    // 투사체
+    // 투사체 (단검)
     for (let i = this.projs.length - 1; i >= 0; i--) {
       const b = this.projs[i];
       b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
       let remove = false;
       if (b.life <= 0 || b.x < 0 || b.x > W || b.y < 0 || b.y > H || hitsWall(b.x, b.y, b.r)) {
         remove = true;
-        if (b.aoe) this.explode(b.x, b.y, b.aoe.r, b.aoe.dmg, b.owner, 0);
       } else {
         for (const q of ps) {
           if (!q.alive || q.id === b.owner) continue;
           if (dist2(b, q) < (b.r + PR) ** 2) {
-            this.damage(q, b.dmg, b.owner);
-            if (b.aoe) this.explode(b.x, b.y, b.aoe.r, b.aoe.dmg, b.owner, q.id);
+            this.damage(q, b.dmg, b.owner, { x: b.x - b.vx * 0.05, y: b.y - b.vy * 0.05, p: 120 });
             remove = true;
             break;
           }
@@ -578,26 +633,11 @@ class Room {
       }
       if (remove) this.projs.splice(i, 1);
     }
-    // 지뢰
-    for (let i = this.mines.length - 1; i >= 0; i--) {
-      const m = this.mines[i];
-      let remove = now >= m.expire;
-      if (!remove && now >= m.armAt) {
-        for (const q of ps) {
-          if (!q.alive || q.id === m.owner) continue;
-          if (dist2(m, q) < (PR + 24) ** 2) { this.explode(m.x, m.y, 75, 40, m.owner, 0); remove = true; break; }
-        }
-      }
-      if (remove) this.mines.splice(i, 1);
-    }
   }
 
   act(p, now) {
-    if (p.fire && now >= p.cd[0]) {
-      p.cd[0] = now + 320;
-      const dx = Math.cos(p.aim), dy = Math.sin(p.aim);
-      this.projs.push({ x: p.x + dx * 24, y: p.y + dy * 24, vx: dx * 700, vy: dy * 700, r: 6, dmg: 8, owner: p.id, life: 0.8, kind: 0, aoe: null });
-    }
+    if (p.stunUntil > now) return;
+    if (p.fire && now >= p.cd[0]) this.swing(p, now);
     for (let s = 1; s <= 2; s++) {
       const pressed = s === 1 ? p.s1 : p.s2;
       const sid = p.skills[s - 1];
@@ -607,29 +647,55 @@ class Room {
     }
   }
 
+  // 기본 공격: 부채꼴 베기. 3타째는 범위/피해/밀치기가 큰 강타
+  swing(p, now) {
+    p.combo = now <= p.comboUntil ? p.combo + 1 : 1;
+    const heavy = p.combo >= 3;
+    if (heavy) p.combo = 0;
+    p.comboUntil = now + ATK.comboWindow;
+    const range = heavy ? ATK.hRange : ATK.range, arc = heavy ? ATK.hArc : ATK.arc;
+    const dmg = heavy ? ATK.hDmg : ATK.dmg, kb = heavy ? ATK.hKb : ATK.kb;
+    p.cd[0] = now + (heavy ? ATK.hCd : ATK.cd);
+    p.atkSlowUntil = now + 220;
+    const dx = Math.cos(p.aim), dy = Math.sin(p.aim);
+    p.kv = { vx: dx * 240, vy: dy * 240, until: now + 110 }; // 베면서 살짝 앞으로 나감
+    this.ev.push({ k: 'swing', o: p.id, x: Math.round(p.x), y: Math.round(p.y), a: +p.aim.toFixed(2), r: range + PR, arc, h: heavy ? 1 : 0 });
+    for (const q of this.players) {
+      if (q === p || !q.alive) continue;
+      const d = Math.hypot(q.x - p.x, q.y - p.y);
+      if (d > range + PR) continue;
+      const diff = Math.abs(angDiff(Math.atan2(q.y - p.y, q.x - p.x), p.aim));
+      if (diff > arc / 2 + Math.atan2(PR, Math.max(d, 1))) continue;
+      if (rayBlocked(p.x, p.y, q.x, q.y)) continue;
+      this.damage(q, dmg, p.id, { x: p.x, y: p.y, p: kb });
+    }
+  }
+
   cast(p, sid, now) {
     const dx = Math.cos(p.aim), dy = Math.sin(p.aim);
     const enemies = this.players.filter(q => q !== p && q.alive);
     switch (sid) {
-      case 'fireball':
-        this.projs.push({ x: p.x + dx * 26, y: p.y + dy * 26, vx: dx * 480, vy: dy * 480, r: 13, dmg: 28, owner: p.id, life: 1.6, kind: 1, aoe: { r: 70, dmg: 14 } });
+      case 'dash':
+        p.dash = { vx: dx * 1500, vy: dy * 1500, until: now + 200, hit: new Set() };
         return true;
-      case 'nova':
-        this.ev.push({ k: 'nova', x: Math.round(p.x), y: Math.round(p.y), r: 150 });
+      case 'whirl':
+        this.ev.push({ k: 'whirl', x: Math.round(p.x), y: Math.round(p.y), r: 95 + PR });
         for (const q of enemies) {
-          if (dist2(p, q) < (150 + PR) ** 2) { this.damage(q, 10, p.id); if (q.alive) q.slowUntil = now + 2500; }
+          if (dist2(p, q) < (95 + PR) ** 2 && !rayBlocked(p.x, p.y, q.x, q.y)) this.damage(q, 16, p.id, { x: p.x, y: p.y, p: 280 });
         }
         return true;
-      case 'bolt': {
-        let len = 0;
-        while (len < 520 && !hitsWall(p.x + dx * len, p.y + dy * len, 2)) len += 6;
-        const x2 = p.x + dx * len, y2 = p.y + dy * len;
-        this.ev.push({ k: 'beam', x1: Math.round(p.x), y1: Math.round(p.y), x2: Math.round(x2), y2: Math.round(y2) });
+      case 'slam':
+        this.ev.push({ k: 'slam', x: Math.round(p.x), y: Math.round(p.y), r: 120 + PR });
         for (const q of enemies) {
-          if (segDist2(q.x, q.y, p.x, p.y, x2, y2) < (PR + 10) ** 2) this.damage(q, 26, p.id);
+          if (dist2(p, q) < (120 + PR) ** 2 && !rayBlocked(p.x, p.y, q.x, q.y)) this.damage(q, 20, p.id, { x: p.x, y: p.y, p: 420, stun: 600 });
         }
         return true;
-      }
+      case 'parry':
+        p.parryUntil = now + 450;
+        return true;
+      case 'shield':
+        p.shieldUntil = now + 1800;
+        return true;
       case 'blink': {
         let nx = p.x, ny = p.y;
         for (let d = 6; d <= 220; d += 6) {
@@ -642,45 +708,56 @@ class Room {
         p.x = nx; p.y = ny;
         return true;
       }
-      case 'shield':
-        p.shieldUntil = now + 1800;
-        return true;
-      case 'dash':
-        p.dash = { vx: dx * 1500, vy: dy * 1500, until: now + 200, hit: new Set() };
-        return true;
-      case 'mine': {
-        const mine = this.mines.filter(m => m.owner === p.id);
-        if (mine.length >= 3) this.mines.splice(this.mines.indexOf(mine[0]), 1);
-        this.mines.push({ x: p.x, y: p.y, owner: p.id, armAt: now + 800, expire: now + 12000 });
-        return true;
-      }
       case 'heal':
         p.hp = Math.min(MAX_HP, p.hp + 30);
         this.ev.push({ k: 'heal', x: Math.round(p.x), y: Math.round(p.y) });
+        return true;
+      case 'throw':
+        this.projs.push({ x: p.x + dx * 24, y: p.y + dy * 24, vx: dx * 900, vy: dy * 900, r: 7, dmg: 14, owner: p.id, life: 0.6, kind: 0 });
+        return true;
+      case 'nova':
+        this.ev.push({ k: 'nova', x: Math.round(p.x), y: Math.round(p.y), r: 150 });
+        for (const q of enemies) {
+          if (dist2(p, q) < (150 + PR) ** 2) { if (this.damage(q, 10, p.id) && q.alive) q.slowUntil = now + 2500; }
+        }
         return true;
       default:
         return false;
     }
   }
 
-  damage(q, dmg, ownerId) {
-    if (!q.alive) return;
+  // kb = { x, y, p, stun }: (x, y)에서 멀어지는 방향으로 p만큼 밀어내고, stun(ms)만큼 기절
+  knock(q, fx, fy, power) {
+    const dx = q.x - fx, dy = q.y - fy, d = Math.hypot(dx, dy) || 1;
+    q.kv = { vx: dx / d * power, vy: dy / d * power, until: this.now + 160 };
+    q.dash = null;
+  }
+  damage(q, dmg, ownerId, kb) {
+    if (!q.alive) return false;
     const x = Math.round(q.x), y = Math.round(q.y);
-    if (q.shieldUntil > this.now) { this.ev.push({ k: 'block', x, y }); return; }
+    if (q.parryUntil > this.now) {
+      // 받아치기 성공: 피해 무효 + 공격자 기절
+      q.parryUntil = 0;
+      this.ev.push({ k: 'parry', x, y });
+      const o = this.players.find(p => p.id === ownerId);
+      if (o && o !== q && o.alive) {
+        o.stunUntil = Math.max(o.stunUntil, this.now + 1000);
+        o.dash = null;
+        this.knock(o, q.x, q.y, 260);
+      }
+      return false;
+    }
+    if (q.shieldUntil > this.now) { this.ev.push({ k: 'block', x, y }); return false; }
     q.hp -= dmg;
     this.ev.push({ k: 'hit', x, y });
     if (q.hp <= 0) {
       q.hp = 0; q.alive = false;
       this.ev.push({ k: 'die', x, y });
+    } else if (kb) {
+      if (kb.p) this.knock(q, kb.x, kb.y, kb.p);
+      if (kb.stun) q.stunUntil = Math.max(q.stunUntil, this.now + kb.stun);
     }
-  }
-
-  explode(x, y, r, dmg, owner, excludeId) {
-    this.ev.push({ k: 'boom', x: Math.round(x), y: Math.round(y), r });
-    for (const q of this.players) {
-      if (!q.alive || q.id === owner || q.id === excludeId) continue;
-      if (dist2({ x, y }, q) < (r + PR) ** 2) this.damage(q, dmg, owner);
-    }
+    return true;
   }
 
   snapshot(now) {
@@ -688,11 +765,13 @@ class Room {
       t: 's', ph: this.phase, tm: Math.max(0, this.phaseEnd - now),
       p: this.players.map(p => [
         p.id, Math.round(p.x), Math.round(p.y), +p.aim.toFixed(2), Math.max(0, Math.ceil(p.hp)),
-        (p.alive ? 1 : 0) | (p.shieldUntil > now ? 2 : 0) | (p.slowUntil > now ? 4 : 0) | (p.dash && now < p.dash.until ? 8 : 0),
+        (p.alive ? 1 : 0) | (p.shieldUntil > now ? 2 : 0) | (p.slowUntil > now ? 4 : 0) | (p.dash && now < p.dash.until ? 8 : 0) |
+          (p.stunUntil > now ? 16 : 0) | (p.parryUntil > now ? 32 : 0),
         Math.max(0, Math.ceil(p.cd[1] - now)), Math.max(0, Math.ceil(p.cd[2] - now)),
       ]),
       b: this.projs.map(b => [Math.round(b.x), Math.round(b.y), b.r, b.kind, b.owner, Math.round(b.vx), Math.round(b.vy)]),
-      m: this.mines.map(m => [Math.round(m.x), Math.round(m.y), m.owner, now >= m.armAt ? 1 : 0]),
+      m: [],
+      z: this.zone(now).map(Math.round),
       e: this.ev,
     };
     this.ev = [];
