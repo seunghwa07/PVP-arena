@@ -597,11 +597,13 @@ class Room {
     for (const p of only ? [only] : this.players) p.raw(buf);
   }
   broadcastRoom() {
-    const m = {
-      t: 'room', code: this.code, host: this.host, phase: this.phase, round: this.round, solo: this.solo, diff: this.diff, map: this.mapId,
-      players: this.players.map(p => ({ id: p.id, name: p.name, av: p.av, look: p.look, bio: p.bio, th: p.th, slot: p.slot, skills: p.skills, ready: p.ready, wins: p.wins, bot: !!p.isBot })),
-    };
-    for (const p of this.players) p.send(m);
+    // 다른 사람이 고른 스킬은 보내지 않음(본인 것만 전송)
+    for (const q of this.players) {
+      q.send({
+        t: 'room', code: this.code, host: this.host, phase: this.phase, round: this.round, solo: this.solo, diff: this.diff, map: this.mapId,
+        players: this.players.map(p => ({ id: p.id, name: p.name, av: p.av, look: p.look, bio: p.bio, th: p.th, slot: p.slot, skills: p === q ? p.skills : [], ready: p.ready, wins: p.wins, bot: !!p.isBot })),
+      });
+    }
   }
   broadcastMsg(text, kind) {
     for (const p of this.players) p.send({ t: 'msg', text, kind: kind || '' });
@@ -864,7 +866,9 @@ class Room {
       for (const p of ps) {
         if (!p.alive) continue;
         if (p.x < z[0] || p.x > z[2] || p.y < z[1] || p.y > z[3]) {
-          p.hp -= ZONE.dps * dt;
+          // 자기장이 줄어들기 시작한 뒤 시간이 지날수록 피해가 점점 세짐 (30초마다 +1배, 최대 6배)
+          const zt = Math.max(0, (now - this.fightAt) / 1000 - ZONE.delay);
+          p.hp -= ZONE.dps * Math.min(6, 1 + zt / 30) * dt;
           if (p.hp <= 0) {
             p.hp = 0; p.alive = false;
             this.ev.push({ k: 'die', x: Math.round(p.x), y: Math.round(p.y) });

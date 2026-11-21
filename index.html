@@ -377,7 +377,7 @@ function drawFig(c, look, o) {
   drawHatOn(c, look[1], R);
   c.restore();
 }
-let BUFFS = [], BASE_SPD = 260, pingMs = 60;
+let BUFFS = [], BASE_SPD = 260, pingMs = 60, pingHist = [];
 let ATK = { range: 64, arc: 2.0, hRange: 78, hArc: 2.6 };
 const angD = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const easeOut = p => 1 - Math.pow(1 - p, 3);
@@ -422,7 +422,7 @@ function onMsg(m) {
       if (m.maps) MAPS_INFO = m.maps;
       break;
     case 'mapdata': setMap(m); break;
-    case 'pong': pingMs = pingMs * 0.6 + Math.max(0, performance.now() - m.c) * 0.4; break;
+    case 'pong': { pingHist.push(Math.max(0, performance.now() - m.c)); if (pingHist.length > 7) pingHist.shift(); const sp = pingHist.slice().sort((a, b) => a - b); pingMs = pingMs * 0.85 + sp[sp.length >> 1] * 0.15; break; }
     case 'joined': if (!m.solo) history.replaceState(null, '', '?r=' + m.code); break;
     case 'room': onRoom(m); break;
     case 'err': toast(m.text); break;
@@ -797,7 +797,7 @@ function pushInput() {
   lastIn = key; lastInT = now; send(m);
 }
 setInterval(pushInput, 16);
-setInterval(() => send({ t: 'ping', c: performance.now() }), 2000);
+setInterval(() => send({ t: 'ping', c: performance.now() }), 1000);
 
 // ---------- 상태 ----------
 const ents = new Map();
@@ -1706,8 +1706,8 @@ function frame(now) {
             let l0x = 0, l0y = 0; for (const h of mh) if (h[0] > ws0) { l0x += h[1]; l0y += h[2]; }
             const ex0 = e.tx + l0x - e.x, ey0 = e.ty + l0y - e.y, vm = Math.hypot(e.psx || 0, e.psy || 0);
             let want = 0;
-            if (vm > 30) { const proj = (ex0 * e.psx + ey0 * e.psy) / vm; want = Math.max(-0.3, Math.min(0.3, (Math.abs(proj) > 6 ? proj - Math.sign(proj) * 6 : 0) / 120)); }
-            e.adj = (e.adj || 0) + (want - (e.adj || 0)) * (1 - Math.exp(-dt * 5));
+            if (vm > 30) { const proj = (ex0 * e.psx + ey0 * e.psy) / vm; want = Math.max(-0.5, Math.min(0.5, (Math.abs(proj) > 4 ? proj - Math.sign(proj) * 4 : 0) / 60)); }
+            e.adj = (e.adj || 0) + (want - (e.adj || 0)) * (1 - Math.exp(-dt * 6));
             spd *= 1 + e.adj;
           }
           const tvx = inp.mx * spd, tvy = inp.my * spd;
@@ -1721,10 +1721,10 @@ function frame(now) {
           let lx = 0, ly = 0;
           for (const h of mh) if (h[0] > ws) { lx += h[1]; ly += h[2]; }
           const ex = e.tx + lx - e.x, ey = e.ty + ly - e.y;
-          // 작은 차이(핑 오차·공격 후 감속 등)는 무시해서 당겨지는 느낌이 없게 하고, 많이 벌어졌을 때만 아주 천천히 맞춤
-          const er = Math.hypot(ex, ey), DEAD = 70;
-          if (er > 160) { e.x += ex; e.y += ey; mh.length = 0; }
-          else if (er > DEAD) { const kc = 1 - Math.exp(-dt * 3), f = (er - DEAD) / er; e.x += ex * f * kc; e.y += ey * f * kc; }
+          // 이동 중에는 위치를 당기지 않음(속도로만 흡수). 멈춰 있을 때(넉백 등)만 서버 위치로 맞추고, 아주 크게 벌어지면 한 번에 맞춤
+          const er = Math.hypot(ex, ey);
+          if (er > 200) { e.x += ex; e.y += ey; mh.length = 0; }
+          else if (Math.hypot(e.psx, e.psy) < 30 && !(inp.mx || inp.my)) { const kc = 1 - Math.exp(-dt * 12); e.x += ex * kc; e.y += ey * kc; }
         }
       } else {
         // 다른 캐릭터: 최근 이동량으로 안정적으로 추정한 속도로 조금만 앞서 가며, 한 번 더 부드럽게 따라감
