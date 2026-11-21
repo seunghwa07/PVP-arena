@@ -1694,12 +1694,22 @@ function frame(now) {
         const canMove = snap.ph === 'fight' && e.alive && !e.dash && !e.stun;
         const mh = e.mh || (e.mh = []);
         if (!canMove) {
-          e.psx = e.psy = 0; mh.length = 0;
+          e.psx = e.psy = 0; e.adj = 0; mh.length = 0;
           const k = 1 - Math.exp(-dt * (e.dash ? 40 : 30));
           e.x += (e.tx - e.x) * k; e.y += (e.ty - e.y) * k;
         } else {
           const inp = computeInput();
-          const spd = BASE_SPD * (e.slow ? 0.5 : 1) * (e.speed ? 1.45 : 1);
+          let spd = BASE_SPD * (e.slow ? 0.5 : 1) * (e.speed ? 1.45 : 1);
+          // 오래 움직일 때 쌓이는 차이(공격 후 감속·핑 오차 등)는 위치를 당기지 않고, 이동 속도를 살짝 높이거나 낮춰서 자연스럽게 흡수
+          {
+            const ws0 = (e.ct || now) - Math.min(400, pingMs) - 15;
+            let l0x = 0, l0y = 0; for (const h of mh) if (h[0] > ws0) { l0x += h[1]; l0y += h[2]; }
+            const ex0 = e.tx + l0x - e.x, ey0 = e.ty + l0y - e.y, vm = Math.hypot(e.psx || 0, e.psy || 0);
+            let want = 0;
+            if (vm > 30) { const proj = (ex0 * e.psx + ey0 * e.psy) / vm; want = Math.max(-0.3, Math.min(0.3, (Math.abs(proj) > 6 ? proj - Math.sign(proj) * 6 : 0) / 120)); }
+            e.adj = (e.adj || 0) + (want - (e.adj || 0)) * (1 - Math.exp(-dt * 5));
+            spd *= 1 + e.adj;
+          }
           const tvx = inp.mx * spd, tvy = inp.my * spd;
           const kv = 1 - Math.exp(-dt * ((tvx || tvy) ? 40 : 50));
           e.psx = (e.psx || 0) + (tvx - (e.psx || 0)) * kv; e.psy = (e.psy || 0) + (tvy - (e.psy || 0)) * kv;
@@ -1712,7 +1722,7 @@ function frame(now) {
           for (const h of mh) if (h[0] > ws) { lx += h[1]; ly += h[2]; }
           const ex = e.tx + lx - e.x, ey = e.ty + ly - e.y;
           // 작은 차이(핑 오차·공격 후 감속 등)는 무시해서 당겨지는 느낌이 없게 하고, 많이 벌어졌을 때만 아주 천천히 맞춤
-          const er = Math.hypot(ex, ey), DEAD = 45;
+          const er = Math.hypot(ex, ey), DEAD = 70;
           if (er > 160) { e.x += ex; e.y += ey; mh.length = 0; }
           else if (er > DEAD) { const kc = 1 - Math.exp(-dt * 3), f = (er - DEAD) / er; e.x += ex * f * kc; e.y += ey * f * kc; }
         }
