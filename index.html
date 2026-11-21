@@ -1591,8 +1591,11 @@ function pushOutC(pp) {
   for (const w of WALLS) {
     const cx = Math.max(w.x, Math.min(pp.x, w.x + w.w)), cy = Math.max(w.y, Math.min(pp.y, w.y + w.h));
     const dx = pp.x - cx, dy = pp.y - cy, d2 = dx * dx + dy * dy;
-    if (d2 >= 324 || d2 === 0) continue;
-    const d = Math.sqrt(d2); pp.x = cx + dx / d * 18; pp.y = cy + dy / d * 18;
+    if (d2 >= 324) continue;
+    if (d2 === 0) {   // 중심이 벽 안: 가장 가까운 면으로 밀어냄 (서버와 같은 규칙)
+      const l = pp.x - w.x, r = w.x + w.w - pp.x, t = pp.y - w.y, bt = w.y + w.h - pp.y, m = Math.min(l, r, t, bt);
+      if (m === l) pp.x = w.x - 18; else if (m === r) pp.x = w.x + w.w + 18; else if (m === t) pp.y = w.y - 18; else pp.y = w.y + w.h + 18;
+    } else { const d = Math.sqrt(d2); pp.x = cx + dx / d * 18; pp.y = cy + dy / d * 18; }
   }
   pp.x = Math.max(18, Math.min(W - 18, pp.x)); pp.y = Math.max(18, Math.min(H - 18, pp.y));
 }
@@ -1735,7 +1738,9 @@ function frame(now) {
           const tvx = inp.mx * spd, tvy = inp.my * spd;
           const kv = 1 - Math.exp(-dt * ((tvx || tvy) ? 40 : 50));
           e.psx = (e.psx || 0) + (tvx - (e.psx || 0)) * kv; e.psy = (e.psy || 0) + (tvy - (e.psy || 0)) * kv;
-          const pp = { x: e.x + e.psx * dt, y: e.y + e.psy * dt }; pushOutC(pp);
+          const sx = e.psx * dt, sy = e.psy * dt, nst = Math.max(1, Math.ceil(Math.hypot(sx, sy) / 5));
+          const pp = { x: e.x, y: e.y };
+          for (let i = 0; i < nst; i++) { pp.x += sx / nst; pp.y += sy / nst; pushOutC(pp); }
           mh.push([now, pp.x - e.x, pp.y - e.y]); e.x = pp.x; e.y = pp.y;
           while (mh.length && now - mh[0][0] > 1000) mh.shift();
           // 서버 위치(tx)는 약 핑 시간 전의 나를 보여주므로, 그 이후 내가 움직인 양을 더해 '지금 서버가 있어야 할 위치'를 계산
@@ -1745,8 +1750,11 @@ function frame(now) {
           const ex = e.tx + lx - e.x, ey = e.ty + ly - e.y;
           // 이동 중에는 위치를 당기지 않음(속도로만 흡수). 멈춰 있을 때(넉백 등)만 서버 위치로 맞추고, 아주 크게 벌어지면 한 번에 맞춤
           const er = Math.hypot(ex, ey);
-          if (er > 200) { e.x += ex; e.y += ey; mh.length = 0; }
+          if (er > 160) { e.x += ex; e.y += ey; mh.length = 0; }
           else if (Math.hypot(e.psx, e.psy) < 30 && !(inp.mx || inp.my)) { const kc = 1 - Math.exp(-dt * 12); e.x += ex * kc; e.y += ey * kc; }
+          else if (er > 36) {   // 이동 중이라도 36 넘게 어긋나면(벽 등) 초당 최대 (어긋남×2)px 속도로 천천히 맞춤 → 큰 뒤로 튕김 방지
+            const mv = Math.min(er - 36 + 4, (er - 30) * 2 * dt * 3, er); e.x += ex / er * mv; e.y += ey / er * mv;
+          }
         }
       } else {
         const ih = e.ih;

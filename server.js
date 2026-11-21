@@ -821,6 +821,7 @@ class Room {
     const ps = this.players;
     for (const p of ps) {
       if (!p.alive) continue;
+      const ox = p.x, oy = p.y;   // 이번 틱 시작 위치 (벽 통과 방지용)
       if (p.dash && now < p.dash.until) {
         p.x += p.dash.vx * dt; p.y += p.dash.vy * dt; p.svx = p.svy = 0;
         for (const q of ps) {
@@ -845,7 +846,11 @@ class Room {
       if (p.kv) {
         if (now < p.kv.until) { p.x += p.kv.vx * dt; p.y += p.kv.vy * dt; } else p.kv = null;
       }
-      pushOutWalls(p);
+      {   // 서버가 잠깐 멈췄다 돌아와 한 번에 멀리 움직여도 벽을 뚫지 않도록 8px 이하로 나눠서 충돌 처리
+        const mdx = p.x - ox, mdy = p.y - oy, mn = Math.min(40, Math.ceil(Math.hypot(mdx, mdy) / 8));
+        if (mn > 1) { p.x = ox; p.y = oy; for (let i = 0; i < mn; i++) { p.x += mdx / mn; p.y += mdy / mn; pushOutWalls(p); } }
+        else pushOutWalls(p);
+      }
       p.x = clamp(p.x, PR, W - PR); p.y = clamp(p.y, PR, H - PR);
     }
     // 플레이어끼리 겹침 방지
