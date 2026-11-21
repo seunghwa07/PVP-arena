@@ -7,7 +7,8 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const W = 3200, H = 2000;         // 경기장 크기 (클라이언트는 1400x800 초과 시 캐릭터 추적 카메라 사용)
+// 현재 처리 중인 방의 맵 (Room.tick / startRound 시작 때 useMap()으로 바꿔 끼워요. 노드는 한 번에 하나씩만 처리하므로 안전해요)
+let W = 3200, H = 2000, WALLS = [], SPAWNS = [];   // 클라이언트는 1400x800 초과 시 캐릭터 추적 카메라 사용
 const PR = 18;                    // 플레이어 반지름
 const BASE_SPEED = 260;
 const MAX_HP = 100;
@@ -21,7 +22,7 @@ const ATK = {
   comboWindow: 800,
 };
 // 자기장: 전투 시작 15초 뒤부터 80초에 걸쳐 중앙으로 줄어듦. 밖에 있으면 초당 8 피해
-const ZONE = { delay: 15, shrink: 80, fw: 560, fh: 380, dps: 8 };
+let ZONE = { delay: 15, shrink: 80, fw: 560, fh: 380, dps: 8 };   // 맵마다 다름 (MAPS[].zone)
 
 // ---------- 능력 정의 (클라이언트에도 전달) ----------
 const SKILLS = {
@@ -36,29 +37,130 @@ const SKILLS = {
   nova:   { name: '서리 폭발', icon: '❄️', cd: 6000, desc: '주변 적에게 10 피해 + 2.5초 둔화' },
 };
 const AVATARS = ['🐱', '🐶', '🦊', '🐼', '🐯', '🐸', '🐙', '🦄', '🐲', '🦉', '🐧', '🦈']; // 프로필 아바타 (클라이언트에는 번호만 오감)
+// 맵에 랜덤하게 나타나는 버프. dur=0이면 즉시 효과
+const BUFFS = [
+  { id: 'heal',  icon: '💚', name: '회복',         color: '#6be585', dur: 0 },
+  { id: 'speed', icon: '⚡', name: '속도 증가',     color: '#ffe066', dur: 6000 },
+  { id: 'power', icon: '🔥', name: '공격력 증가',   color: '#ff7a5c', dur: 8000 },
+  { id: 'cdr',   icon: '⏱️', name: '쿨타임 초기화', color: '#9be7ff', dur: 0 },
+];
+const BUFF_WEIGHT = [35, 30, 20, 15];   // 등장 확률 비중
+const PICK = { first: [5000, 9000], every: [7000, 14000], max: 4, life: 28000, r: 26, healAmt: 35, speedMul: 1.45, powerMul: 1.4 };
 const LOOK_N = [8, 8, 7];   // 캐릭터 외형 개수: [얼굴, 모자, 칼 스킨] (클라이언트 목록과 같아야 해요)
 const THEME_N = 7;          // 프로필 카드 배경 개수
 const SKILL_IDS = Object.keys(SKILLS);
 const SKILL_META = SKILL_IDS.map(id => ({ id, ...SKILLS[id] }));
 
-// 왼쪽 위 1/4만 정의하고 좌우/상하로 대칭 복제 (+ 중앙 요새)
-const QUAD = [
-  { x: 360, y: 300, w: 220, h: 34 }, { x: 360, y: 300, w: 34, h: 220 },   // ㄱ자 엄폐물
-  { x: 800, y: 200, w: 34, h: 260 },
-  { x: 1100, y: 120, w: 400, h: 34 },                                       // 위쪽 긴 벽
-  { x: 1000, y: 420, w: 240, h: 34 },
-  { x: 600, y: 700, w: 34, h: 240 },
-  { x: 880, y: 620, w: 70, h: 70 }, { x: 1250, y: 720, w: 70, h: 70 }, { x: 1380, y: 280, w: 70, h: 70 }, // 기둥
-  { x: 1160, y: 860, w: 200, h: 34 },
-];
-const WALLS = [{ x: 1450, y: 880, w: 300, h: 240 }];                        // 중앙 요새
-for (const q of QUAD) {
-  WALLS.push(q);
-  WALLS.push({ x: W - q.x - q.w, y: q.y, w: q.w, h: q.h });
-  WALLS.push({ x: q.x, y: H - q.y - q.h, w: q.w, h: q.h });
-  WALLS.push({ x: W - q.x - q.w, y: H - q.y - q.h, w: q.w, h: q.h });
+// ---------- 맵 정의 ----------
+// 맵 = { id, name, icon, desc, style, W, H, walls, spawns, zone, pickMax, rooms?, doors?, nav? }
+// 새 맵을 추가하려면 build 함수를 만들어 아래 MAPS에 넣으면 돼요 (클라이언트 선택 목록에 자동으로 나타나요)
+
+// (1) 기존 맵: 풀밭 아레나. 왼쪽 위 1/4만 정의하고 좌우/상하로 대칭 복제 (+ 중앙 요새)
+function buildArena() {
+  const w = 3200, h = 2000;
+  const QUAD = [
+    { x: 360, y: 300, w: 220, h: 34 }, { x: 360, y: 300, w: 34, h: 220 },   // ㄱ자 엄폐물
+    { x: 800, y: 200, w: 34, h: 260 },
+    { x: 1100, y: 120, w: 400, h: 34 },                                       // 위쪽 긴 벽
+    { x: 1000, y: 420, w: 240, h: 34 },
+    { x: 600, y: 700, w: 34, h: 240 },
+    { x: 880, y: 620, w: 70, h: 70 }, { x: 1250, y: 720, w: 70, h: 70 }, { x: 1380, y: 280, w: 70, h: 70 }, // 기둥
+    { x: 1160, y: 860, w: 200, h: 34 },
+  ];
+  const walls = [{ x: 1450, y: 880, w: 300, h: 240 }];                        // 중앙 요새
+  for (const q of QUAD) {
+    walls.push(q);
+    walls.push({ x: w - q.x - q.w, y: q.y, w: q.w, h: q.h });
+    walls.push({ x: q.x, y: h - q.y - q.h, w: q.w, h: q.h });
+    walls.push({ x: w - q.x - q.w, y: h - q.y - q.h, w: q.w, h: q.h });
+  }
+  return {
+    id: 'arena', name: '풀밭 아레나', icon: '🌳', desc: '탁 트인 풀밭에 돌 엄폐물이 흩어진 기본 맵', style: 'field',
+    W: w, H: h, walls,
+    spawns: [[140, 140], [w - 140, h - 140], [w - 140, 140], [140, h - 140]],
+    zone: { delay: 15, shrink: 80, fw: 560, fh: 380, dps: 8 }, pickMax: 4,
+  };
 }
-const SPAWNS = [[140, 140], [W - 140, H - 140], [W - 140, 140], [140, H - 140]];
+
+// (2) 신규 맵: 대형 빌딩 (4800x3000). 방 + 문 + 복도 + 중앙 아트리움.
+//     왼쪽 위 1/4(과 축 위의 방)만 정의하고 대칭 복제해요. 복도 폭 200 이상, 문 폭 120~200이라 캐릭터(지름 36)가 편하게 지나가요.
+function buildTower() {
+  const w = 4800, h = 3000, T = 40;                 // T = 벽 두께
+  const walls = [], rooms = [], doors = [];
+  // [a, b] 구간에서 틈(gaps)을 뺀 조각들
+  const cut = (a, b, gaps) => {
+    let segs = [[a, b]];
+    for (const [g0, g1] of gaps) {
+      const next = [];
+      for (const [s0, s1] of segs) {
+        if (g1 <= s0 || g0 >= s1) { next.push([s0, s1]); continue; }
+        if (g0 > s0) next.push([s0, g0]);
+        if (g1 < s1) next.push([g1, s1]);
+      }
+      segs = next;
+    }
+    return segs;
+  };
+  // 방 하나: 사방 벽 + 문(틈). 문 좌표는 절대 좌표 (N/S 변은 x 구간, W/E 변은 y 구간)
+  const room = (x, y, rw, rh, d, floor) => {
+    const o = { walls: [], doors: [], rooms: [{ x, y, w: rw, h: rh, k: floor }] };
+    for (const [a, b] of cut(x, x + rw, d.N || [])) o.walls.push({ x: a, y, w: b - a, h: T });
+    for (const [a, b] of cut(x, x + rw, d.S || [])) o.walls.push({ x: a, y: y + rh - T, w: b - a, h: T });
+    for (const [a, b] of cut(y + T, y + rh - T, d.W || [])) o.walls.push({ x, y: a, w: T, h: b - a });
+    for (const [a, b] of cut(y + T, y + rh - T, d.E || [])) o.walls.push({ x: x + rw - T, y: a, w: T, h: b - a });
+    for (const [a, b] of d.N || []) o.doors.push({ x: a, y, w: b - a, h: T });
+    for (const [a, b] of d.S || []) o.doors.push({ x: a, y: y + rh - T, w: b - a, h: T });
+    for (const [a, b] of d.W || []) o.doors.push({ x, y: a, w: T, h: b - a });
+    for (const [a, b] of d.E || []) o.doors.push({ x: x + rw - T, y: a, w: T, h: b - a });
+    return o;
+  };
+  const prop = (x, y, pw, ph, kind) => ({ walls: [{ x, y, w: pw, h: ph, p: kind }], doors: [], rooms: [] });  // 기둥(1) / 가구(2)
+  const mX = r => ({ ...r, x: w - r.x - r.w });
+  const mY = r => ({ ...r, y: h - r.y - r.h });
+  const seen = new Set();
+  const addTo = (list, tag, r) => { const k = tag + [r.x, r.y, r.w, r.h, r.p || 0, r.k || 0].join(','); if (!seen.has(k)) { seen.add(k); list.push(r); } };
+  // mode: 'q' 4방향 복제 / 'x' 좌우 / 'y' 상하 / '' 그대로 (축 위에 걸친 방은 문 위치가 대칭이라 한쪽만 복제)
+  const place = (g, mode) => {
+    const fx = mode === 'q' || mode === 'x', fy = mode === 'q' || mode === 'y';
+    const vs = [r => r];
+    if (fx) vs.push(mX);
+    if (fy) vs.push(mY);
+    if (fx && fy) vs.push(r => mY(mX(r)));
+    for (const f of vs) {
+      for (const r of g.walls) addTo(walls, 'w', f(r));
+      for (const r of g.doors) addTo(doors, 'd', f(r));
+      for (const r of g.rooms) addTo(rooms, 'r', f(r));
+    }
+  };
+
+  // 방 바닥 종류 k: 1 파란 카펫 / 2 원목 / 3 연구실 타일 / 4 아트리움 대리석
+  // --- 4방향 복제되는 방 (왼쪽 위 1/4 안쪽) ---
+  place(room(0, 0, 800, 600, { E: [[190, 350]], S: [[300, 460]] }, 3), 'q');                                    // 출발 방
+  place(room(1040, 0, 860, 500, { W: [[190, 350]], E: [[190, 350]], S: [[1250, 1430]] }, 2), 'q');             // 북쪽 사무실
+  place(room(0, 800, 620, 300, { N: [[250, 400]], E: [[880, 1020]] }, 1), 'q');                                 // 서쪽 회의실
+  place(room(1100, 760, 600, 420, { N: [[1250, 1420]], S: [[1250, 1420]], W: [[880, 1040]], E: [[880, 1040]] }, 2), 'q'); // 중앙 사무실
+  // --- 축 위의 방 ---
+  place(room(2100, 0, 600, 420, { W: [[160, 300]], E: [[160, 300]], S: [[2290, 2510]] }, 1), 'y');              // 위·아래 중앙 로비
+  place(room(2200, 620, 400, 300, { W: [[710, 850]], E: [[710, 850]], N: [[2330, 2470]], S: [[2330, 2470]] }, 3), 'y'); // 보안실
+  place(room(0, 1300, 420, 400, { N: [[140, 280]], S: [[140, 280]], E: [[1400, 1600]] }, 3), 'x');             // 좌우 끝 방
+  // --- 중앙 아트리움 ---
+  place(room(1900, 1100, 1000, 800, { N: [[2300, 2500]], S: [[2300, 2500]], W: [[1400, 1600]], E: [[1400, 1600]] }, 4), '');
+  place(prop(2090, 1240, 90, 90, 1), 'q');         // 아트리움 기둥 4개
+  place(prop(2330, 1430, 140, 140, 2), '');        // 중앙 안내 데스크
+  // --- 복도 / 로비 가구 (엄폐물) ---
+  for (const [x, y, pw, ph, k] of [
+    [880, 960, 70, 70, 1], [700, 1260, 70, 70, 1], [1000, 1260, 70, 70, 1], [1480, 600, 60, 60, 1], [1990, 800, 70, 70, 1],
+    [780, 1400, 240, 36, 2], [1250, 1330, 260, 36, 2], [1650, 1260, 36, 200, 2],
+  ]) place(prop(x, y, pw, ph, k), 'q');
+
+  return {
+    id: 'tower', name: '대형 빌딩', icon: '🏢', desc: '방·문·복도로 이어진 거대한 건물. 중앙 아트리움에서 마지막 결전', style: 'building',
+    W: w, H: h, walls, rooms, doors,
+    spawns: [[140, 140], [w - 140, h - 140], [w - 140, 140], [140, h - 140]],
+    zone: { delay: 20, shrink: 120, fw: 900, fh: 560, dps: 8 }, pickMax: 6,
+    nav: true,   // 봇이 벽 너머 적을 찾아갈 때 길찾기 사용
+  };
+}
 
 // ---------- 수학 / 충돌 ----------
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -67,6 +169,7 @@ const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 
 function hitsWall(x, y, r) {
   for (const w of WALLS) {
+    if (x + r < w.x || x - r > w.x + w.w || y + r < w.y || y - r > w.y + w.h) continue;
     const cx = clamp(x, w.x, w.x + w.w), cy = clamp(y, w.y, w.y + w.h);
     if ((x - cx) ** 2 + (y - cy) ** 2 < r * r) return true;
   }
@@ -128,6 +231,87 @@ const DIFF = {
   hard:   { err: 0.04, think: 90,  dodge: 1,    skill: 0.30, burst: null,        lead: true,  dist: 72, retreat: true },
 };
 
+// ---------- 맵 등록 / 전환 ----------
+const MAPS = { arena: buildArena(), tower: buildTower() };
+const MAP_ORDER = ['arena', 'tower'];
+const MAP_LIST = MAP_ORDER.map(id => { const m = MAPS[id]; return { id, name: m.name, icon: m.icon, desc: m.desc, W: m.W, H: m.H }; });
+for (const id of MAP_ORDER) {   // 클라이언트에 보낼 맵 데이터 (한 번만 만들어 둠)
+  const m = MAPS[id];
+  m.payload = JSON.stringify({ t: 'mapdata', id, style: m.style, W: m.W, H: m.H, walls: m.walls, rooms: m.rooms || [], doors: m.doors || [] });
+}
+function useMap(m) { W = m.W; H = m.H; WALLS = m.walls; SPAWNS = m.spawns; ZONE = m.zone; }
+useMap(MAPS.arena);
+
+// ---------- 봇 길찾기 (nav: true 인 맵에서만) ----------
+// 맵을 NAV px 칸으로 나누고, 목표에서 BFS로 거리장을 만든 뒤 내려가는 방향으로 따라가요.
+const NAV = 40;
+function navGrid(m) {
+  if (m.navg) return m.navg;
+  useMap(m);
+  const cols = Math.ceil(m.W / NAV), rows = Math.ceil(m.H / NAV), ok = new Uint8Array(cols * rows);
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) ok[r * cols + c] = blocked((c + 0.5) * NAV, (r + 0.5) * NAV, PR + 4) ? 0 : 1;
+  return (m.navg = { cols, rows, ok });
+}
+function nearestOk(g, cx, cy) {
+  cx = clamp(cx, 0, g.cols - 1); cy = clamp(cy, 0, g.rows - 1);
+  if (g.ok[cy * g.cols + cx]) return [cx, cy];
+  for (let rad = 1; rad <= 6; rad++) {
+    for (let dy = -rad; dy <= rad; dy++) for (let dx = -rad; dx <= rad; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== rad) continue;
+      const x = cx + dx, y = cy + dy;
+      if (x >= 0 && y >= 0 && x < g.cols && y < g.rows && g.ok[y * g.cols + x]) return [x, y];
+    }
+  }
+  return null;
+}
+const NAV_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+function segClear(x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+  for (let s = 12; s < len; s += 12) if (blocked(x1 + dx / len * s, y1 + dy / len * s, PR + 2)) return false;
+  return true;
+}
+// (x,y)에서 (gx,gy)로 가는 길의 다음 진행 각도. 길이 없으면 null
+function navAngle(m, x, y, gx, gy) {
+  const g = navGrid(m);
+  const goal = nearestOk(g, Math.floor(gx / NAV), Math.floor(gy / NAV));
+  const start = nearestOk(g, Math.floor(x / NAV), Math.floor(y / NAV));
+  if (!goal || !start) return null;
+  const { cols, rows, ok } = g, dist = new Int32Array(cols * rows).fill(-1), q = new Int32Array(cols * rows);
+  let head = 0, tail = 0;
+  const gi = goal[1] * cols + goal[0], si = start[1] * cols + start[0];
+  dist[gi] = 0; q[tail++] = gi;
+  while (head < tail && dist[si] < 0) {
+    const cur = q[head++], cx = cur % cols, cy = (cur / cols) | 0;
+    for (const [dx, dy] of NAV_DIRS) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+      const ni = ny * cols + nx;
+      if (!ok[ni] || dist[ni] >= 0) continue;
+      if (dx && dy && !(ok[cy * cols + nx] && ok[ny * cols + cx])) continue;   // 모서리 끼임 방지
+      dist[ni] = dist[cur] + 1; q[tail++] = ni;
+    }
+  }
+  if (dist[si] < 0) return null;
+  let cur = si, first = null, best = null;
+  for (let step = 0; step < 14 && dist[cur] > 0; step++) {
+    const cx = cur % cols, cy = (cur / cols) | 0;
+    let nb = -1, nd = dist[cur];
+    for (const [dx, dy] of NAV_DIRS) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+      const ni = ny * cols + nx;
+      if (dist[ni] >= 0 && dist[ni] < nd && (!(dx && dy) || (ok[cy * cols + nx] && ok[ny * cols + cx]))) { nd = dist[ni]; nb = ni; }
+    }
+    if (nb < 0) break;
+    cur = nb;
+    const px = ((cur % cols) + 0.5) * NAV, py = (((cur / cols) | 0) + 0.5) * NAV;
+    if (!first) first = [px, py];
+    if (segClear(x, y, px, py)) best = [px, py];
+  }
+  const t = best || first;
+  return t ? Math.atan2(t[1] - y, t[0] - x) : null;
+}
+
 // ---------- WebSocket (RFC 6455 최소 구현) ----------
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 function wsFrame(op, payload) {
@@ -183,9 +367,9 @@ class Client {
     socket.on('close', () => this.onClose());
     socket.on('error', () => this.onClose());
     this.send({
-      t: 'hello', id: this.id, W, H, walls: WALLS, skills: SKILL_META,
+      t: 'hello', id: this.id, W: MAPS.arena.W, H: MAPS.arena.H, walls: MAPS.arena.walls, maps: MAP_LIST, skills: SKILL_META,
       maxPlayers: MAX_PLAYERS, winRounds: WIN_ROUNDS, maxHp: MAX_HP,
-      avatars: AVATARS, atk: { range: ATK.range, arc: ATK.arc, hRange: ATK.hRange, hArc: ATK.hArc },
+      avatars: AVATARS, buffs: BUFFS, speed: BASE_SPEED, atk: { range: ATK.range, arc: ATK.arc, hRange: ATK.hRange, hArc: ATK.hArc },
     });
   }
   onData(d) {
@@ -241,6 +425,15 @@ class Client {
         r.setBots(clamp(Math.floor(Number(m.n) || 1), 1, MAX_PLAYERS - 1));
         break;
       }
+      case 'map': {
+        const r = this.room;
+        if (!r || r.phase !== 'lobby' || r.host !== this.id) return;
+        if (!MAPS[m.id]) return;
+        r.mapId = m.id; r.map = MAPS[m.id];
+        r.sendMap();
+        r.broadcastRoom();
+        break;
+      }
       case 'leave': leaveRoom(this); break;
       case 'pick': {
         const r = this.room;
@@ -268,6 +461,7 @@ class Client {
         r.startMatch();
         break;
       }
+      case 'ping': this.send({ t: 'pong', c: Number(m.c) || 0 }); break;
       case 'i': {
         const n = v => (Number.isFinite(v) ? v : 0);
         let mx = clamp(n(m.mx), -1, 1), my = clamp(n(m.my), -1, 1);
@@ -310,7 +504,7 @@ function randomSkills() {
   return [a[0], a[1]];
 }
 function newAi() {
-  return { nextThink: 0, err: 0, side: 1, sideUntil: 0, strafe: 1, strafeUntil: 0, fireOn: true, fireUntil: 0, dodgeCool: 0, dodgeUntil: 0, dodgeAng: 0 };
+  return { nextThink: 0, err: 0, side: 1, sideUntil: 0, strafe: 1, strafeUntil: 0, fireOn: true, fireUntil: 0, dodgeCool: 0, dodgeUntil: 0, dodgeAng: 0, navUntil: 0, navAng: 0 };
 }
 // 솔로 연습용 봇 (네트워크 없이 플레이어와 같은 필드를 가짐)
 class Bot {
@@ -363,8 +557,10 @@ class Room {
     this.last = Date.now();
     this.now = Date.now();
     this.fightAt = 0;
+    this.pickups = []; this.nextPickup = 0; this.pid = 1; this.src = 'sword';
     this.solo = false;
     this.diff = 'normal';
+    this.mapId = 'arena'; this.map = MAPS.arena;
   }
   add(c) {
     if (this.phase !== 'lobby') return c.send({ t: 'err', text: '이미 게임이 진행 중이에요' });
@@ -380,6 +576,7 @@ class Room {
     this.players.push(c);
     if (this.host === null) this.host = c.id;
     c.send({ t: 'joined', code: this.code, solo: this.solo });
+    this.sendMap(c);
     this.broadcastRoom();
   }
   setBots(n) {
@@ -395,9 +592,13 @@ class Room {
     }
     this.broadcastRoom();
   }
+  sendMap(only) {
+    const buf = wsFrame(1, Buffer.from(this.map.payload));
+    for (const p of only ? [only] : this.players) p.raw(buf);
+  }
   broadcastRoom() {
     const m = {
-      t: 'room', code: this.code, host: this.host, phase: this.phase, round: this.round, solo: this.solo, diff: this.diff,
+      t: 'room', code: this.code, host: this.host, phase: this.phase, round: this.round, solo: this.solo, diff: this.diff, map: this.mapId,
       players: this.players.map(p => ({ id: p.id, name: p.name, av: p.av, look: p.look, bio: p.bio, th: p.th, slot: p.slot, skills: p.skills, ready: p.ready, wins: p.wins, bot: !!p.isBot })),
     };
     for (const p of this.players) p.send(m);
@@ -411,7 +612,10 @@ class Room {
     this.startRound();
   }
   startRound() {
+    useMap(this.map);
+    this.sendMap();   // 클라이언트가 이 방의 맵을 그리도록
     this.projs = []; this.ev = [];
+    this.pickups = []; this.nextPickup = 0;
     this.fightAt = 0;
     this.players.forEach(p => {
       const s = SPAWNS[p.slot % SPAWNS.length];
@@ -419,7 +623,7 @@ class Room {
       p.hp = MAX_HP; p.alive = true;
       p.cd = [0, 0, 0];
       p.shieldUntil = 0; p.slowUntil = 0; p.dash = null;
-      p.stunUntil = 0; p.parryUntil = 0; p.kv = null; p.atkSlowUntil = 0;
+      p.stunUntil = 0; p.parryUntil = 0; p.kv = null; p.atkSlowUntil = 0; p.speedUntil = 0; p.powerUntil = 0;
       p.combo = 0; p.comboUntil = 0; p.svx = p.svy = 0;
       p.mx = p.my = 0; p.fire = p.s1 = p.s2 = false;
       p.aim = Math.atan2(H / 2 - p.y, W / 2 - p.x);
@@ -433,7 +637,7 @@ class Room {
   toLobby(text) {
     this.phase = 'lobby';
     this.round = 0;
-    this.projs = []; this.ev = [];
+    this.projs = []; this.ev = []; this.pickups = [];
     for (const p of this.players) {
       p.ready = !!p.isBot; p.wins = 0;
       if (p.isBot) p.skills = randomSkills();
@@ -466,6 +670,7 @@ class Room {
   }
 
   tick(now) {
+    useMap(this.map);
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
     this.now = now;
@@ -473,7 +678,10 @@ class Room {
       for (const p of this.players) if (p.isBot) { p.mx = p.my = 0; p.fire = p.s1 = p.s2 = false; }
     }
     if (this.phase === 'countdown') {
-      if (now >= this.phaseEnd) { this.phase = 'fight'; this.fightAt = now; this.broadcastRoom(); }
+      if (now >= this.phaseEnd) {
+        this.phase = 'fight'; this.fightAt = now; this.broadcastRoom();
+        this.nextPickup = now + PICK.first[0] + Math.random() * (PICK.first[1] - PICK.first[0]);
+      }
     } else if (this.phase === 'fight') {
       for (const p of this.players) if (p.isBot) this.botThink(p, now);
       this.simulate(now, dt, true);
@@ -538,12 +746,21 @@ class Room {
     // 이동: 접근 / 간격 조절 / 좌우 이동
     let mv;
     if (ai.dodgeUntil > now) mv = ai.dodgeAng;
-    else if (zoneRush) mv = Math.atan2(H / 2 - b.y, W / 2 - b.x);
-    else if (d > D.dist + 25 || !los) mv = ang;
+    else if (zoneRush) mv = this.map.nav ? this.navTo(b, now, W / 2, H / 2, Math.atan2(H / 2 - b.y, W / 2 - b.x)) : Math.atan2(H / 2 - b.y, W / 2 - b.x);
+    else if (d > D.dist + 25 || !los) mv = (!los && this.map.nav) ? this.navTo(b, now, t.x, t.y, ang) : ang;
     else if (D.retreat && d < D.dist - 30) mv = ang + Math.PI;
     else {
       if (now >= ai.strafeUntil) { ai.strafe = Math.random() < 0.5 ? 1 : -1; ai.strafeUntil = now + 800 + Math.random() * 1200; }
       mv = ang + ai.strafe * Math.PI / 2;
+    }
+    if (this.diff !== 'easy' && ai.dodgeUntil <= now && !zoneRush && d > 140) {
+      let tu = null, tb = 600 * 600;
+      for (const u of this.pickups) {
+        if (u.type === 0 && b.hp > MAX_HP * 0.85) continue;
+        const d2 = dist2(b, u);
+        if (d2 < tb && !rayBlocked(b.x, b.y, u.x, u.y)) { tb = d2; tu = u; }
+      }
+      if (tu) mv = Math.atan2(tu.y - b.y, tu.x - b.x);
     }
     mv = steer(b.x, b.y, mv, ai.side);
     b.mx = Math.cos(mv); b.my = Math.sin(mv);
@@ -588,6 +805,16 @@ class Room {
     b.aim = aimOut; b.fire = fire; b.s1 = f[0]; b.s2 = f[1];
   }
 
+  // 길찾기 이동 방향 (0.18초마다만 다시 계산). 실패하면 fallback 각도
+  navTo(b, now, gx, gy, fallback) {
+    const ai = b.ai;
+    if (now >= ai.navUntil) {
+      const a = navAngle(this.map, b.x, b.y, gx, gy);
+      ai.navAng = a === null ? fallback : a; ai.navUntil = now + 180;
+    }
+    return ai.navAng;
+  }
+
   simulate(now, dt, canAct) {
     const ps = this.players;
     for (const p of ps) {
@@ -599,15 +826,16 @@ class Room {
           if (q === p || !q.alive || p.dash.hit.has(q.id)) continue;
           if (dist2(p, q) < (PR * 2 + 4) ** 2) {
             p.dash.hit.add(q.id);
+            this.src = 'dash';
             this.damage(q, 22, p.id, { x: p.x, y: p.y, p: 380 });
           }
         }
       } else {
         p.dash = null;
-        let spd = BASE_SPEED * (p.slowUntil > now ? 0.5 : 1) * (p.atkSlowUntil > now ? 0.55 : 1);
+        let spd = BASE_SPEED * (p.slowUntil > now ? 0.5 : 1) * (p.atkSlowUntil > now ? 0.55 : 1) * (p.speedUntil > now ? PICK.speedMul : 1);
         if (p.stunUntil > now) spd = 0;
         const tvx = p.mx * spd, tvy = p.my * spd;
-        const k = 1 - Math.exp(-dt * ((tvx || tvy) ? 18 : 26)); // 출발은 살짝 느슨하게, 멈출 땐 빠르게
+        const k = 1 - Math.exp(-dt * ((tvx || tvy) ? 40 : 50)); // 키를 누르면 거의 바로 속도가 붙고, 떼면 바로 멈춤
         p.svx = (p.svx || 0) + (tvx - (p.svx || 0)) * k;
         p.svy = (p.svy || 0) + (tvy - (p.svy || 0)) * k;
         p.x += p.svx * dt; p.y += p.svy * dt;
@@ -640,10 +868,13 @@ class Room {
           if (p.hp <= 0) {
             p.hp = 0; p.alive = false;
             this.ev.push({ k: 'die', x: Math.round(p.x), y: Math.round(p.y) });
+            this.ev.push({ k: 'kill', o: 0, v: p.id, s: 'zone' });
           }
         }
       }
     }
+
+    if (canAct) this.updatePickups(now);
 
     // 투사체 (단검)
     for (let i = this.projs.length - 1; i >= 0; i--) {
@@ -656,6 +887,7 @@ class Room {
         for (const q of ps) {
           if (!q.alive || q.id === b.owner) continue;
           if (dist2(b, q) < (b.r + PR) ** 2) {
+            this.src = 'throw';
             this.damage(q, b.dmg, b.owner, { x: b.x - b.vx * 0.05, y: b.y - b.vy * 0.05, p: 120 });
             remove = true;
             break;
@@ -664,6 +896,44 @@ class Room {
       }
       if (remove) this.projs.splice(i, 1);
     }
+  }
+
+  updatePickups(now) {
+    for (let i = this.pickups.length - 1; i >= 0; i--) if (now >= this.pickups[i].expire) this.pickups.splice(i, 1);
+    if (this.nextPickup && now >= this.nextPickup) {
+      if (this.pickups.length < (this.map.pickMax || PICK.max)) this.spawnPickup(now);
+      this.nextPickup = now + PICK.every[0] + Math.random() * (PICK.every[1] - PICK.every[0]);
+    }
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      for (let i = this.pickups.length - 1; i >= 0; i--) {
+        const u = this.pickups[i];
+        if (dist2(p, u) < (PR + PICK.r) ** 2) { this.pickups.splice(i, 1); this.applyBuff(p, u.type, now); }
+      }
+    }
+  }
+  spawnPickup(now) {
+    const z = this.zone(now), m = 90;
+    for (let t = 0; t < 40; t++) {
+      const x = z[0] + m + Math.random() * Math.max(1, z[2] - z[0] - 2 * m);
+      const y = z[1] + m + Math.random() * Math.max(1, z[3] - z[1] - 2 * m);
+      if (blocked(x, y, PICK.r + 6)) continue;
+      if (this.pickups.some(u => dist2(u, { x, y }) < 250 * 250)) continue;     // 다른 버프와 겹치지 않게
+      if (this.players.some(p => p.alive && dist2(p, { x, y }) < 220 * 220)) continue; // 플레이어 바로 앞에 생기지 않게
+      let r = Math.random() * BUFF_WEIGHT.reduce((a, b) => a + b, 0), type = 0;
+      for (let i = 0; i < BUFF_WEIGHT.length; i++) { r -= BUFF_WEIGHT[i]; if (r <= 0) { type = i; break; } }
+      this.pickups.push({ id: this.pid++, type, x: Math.round(x), y: Math.round(y), expire: now + PICK.life });
+      this.ev.push({ k: 'pspawn', t: type, x: Math.round(x), y: Math.round(y) });
+      return;
+    }
+  }
+  applyBuff(p, type, now) {
+    const B = BUFFS[type];
+    if (B.id === 'heal') p.hp = Math.min(MAX_HP, p.hp + PICK.healAmt);
+    else if (B.id === 'speed') p.speedUntil = now + B.dur;
+    else if (B.id === 'power') p.powerUntil = now + B.dur;
+    else if (B.id === 'cdr') { p.cd[1] = 0; p.cd[2] = 0; }
+    this.ev.push({ k: 'pick', o: p.id, t: type, x: Math.round(p.x), y: Math.round(p.y) });
   }
 
   act(p, now) {
@@ -685,7 +955,10 @@ class Room {
       const pressed = s === 1 ? p.s1 : p.s2;
       const sid = p.skills[s - 1];
       if (pressed && sid && now >= p.cd[s]) {
-        if (this.cast(p, sid, now)) p.cd[s] = now + SKILLS[sid].cd;
+        if (this.cast(p, sid, now)) {
+          p.cd[s] = now + SKILLS[sid].cd;
+          this.ev.push({ k: 'cast', o: p.id, s: sid, x: Math.round(p.x), y: Math.round(p.y), a: +p.aim.toFixed(2) });
+        }
       }
     }
   }
@@ -700,6 +973,7 @@ class Room {
     const dmg = heavy ? ATK.hDmg : ATK.dmg, kb = heavy ? ATK.hKb : ATK.kb;
     p.cd[0] = now + (heavy ? ATK.hCd : ATK.cd);
     p.atkSlowUntil = now + 220;
+    this.src = 'sword';
     const dx = Math.cos(p.aim), dy = Math.sin(p.aim);
     p.kv = { vx: dx * 240, vy: dy * 240, until: now + 110 }; // 베면서 살짝 앞으로 나감
     this.ev.push({ k: 'swing', o: p.id, x: Math.round(p.x), y: Math.round(p.y), a: +p.aim.toFixed(2), r: range + PR, arc, h: heavy ? 1 : 0 });
@@ -715,6 +989,7 @@ class Room {
   }
 
   cast(p, sid, now) {
+    this.src = sid;
     const dx = Math.cos(p.aim), dy = Math.sin(p.aim);
     const enemies = this.players.filter(q => q !== p && q.alive);
     switch (sid) {
@@ -794,11 +1069,14 @@ class Room {
       return false;
     }
     if (q.shieldUntil > this.now) { this.ev.push({ k: 'block', x, y }); return false; }
+    const ow = this.players.find(pl => pl.id === ownerId);
+    if (ow && ow.powerUntil > this.now) dmg = Math.round(dmg * PICK.powerMul);
     q.hp -= dmg;
     this.ev.push({ k: 'hit', x, y });
     if (q.hp <= 0) {
       q.hp = 0; q.alive = false;
       this.ev.push({ k: 'die', x, y });
+      this.ev.push({ k: 'kill', o: ownerId, v: q.id, s: this.src || 'sword' });
     } else if (kb) {
       if (kb.p) this.knock(q, kb.x, kb.y, kb.p);
       if (kb.stun) q.stunUntil = Math.max(q.stunUntil, this.now + kb.stun);
@@ -812,11 +1090,13 @@ class Room {
       p: this.players.map(p => [
         p.id, Math.round(p.x), Math.round(p.y), +p.aim.toFixed(2), Math.max(0, Math.ceil(p.hp)),
         (p.alive ? 1 : 0) | (p.shieldUntil > now ? 2 : 0) | (p.slowUntil > now ? 4 : 0) | (p.dash && now < p.dash.until ? 8 : 0) |
-          (p.stunUntil > now ? 16 : 0) | (p.parryUntil > now ? 32 : 0) | (p.combo >= 2 && now <= p.comboUntil ? 64 : 0),
+          (p.stunUntil > now ? 16 : 0) | (p.parryUntil > now ? 32 : 0) | (p.combo >= 2 && now <= p.comboUntil ? 64 : 0) |
+          (p.speedUntil > now ? 128 : 0) | (p.powerUntil > now ? 256 : 0),
         Math.max(0, Math.ceil(p.cd[1] - now)), Math.max(0, Math.ceil(p.cd[2] - now)),
       ]),
       b: this.projs.map(b => [Math.round(b.x), Math.round(b.y), b.r, b.kind, b.owner, Math.round(b.vx), Math.round(b.vy)]),
       m: [],
+      u: this.pickups.map(u => [u.id, u.type, u.x, u.y, Math.max(0, u.expire - now)]),
       z: this.zone(now).map(Math.round),
       e: this.ev,
     };
@@ -832,7 +1112,7 @@ class Room {
 setInterval(() => {
   const now = Date.now();
   for (const r of rooms.values()) if (r.phase !== 'lobby') r.tick(now);
-}, 33);
+}, 25);
 
 // ---------- HTTP ----------
 const server = http.createServer((req, res) => {
