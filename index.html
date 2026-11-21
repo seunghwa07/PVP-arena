@@ -377,7 +377,7 @@ function drawFig(c, look, o) {
   drawHatOn(c, look[1], R);
   c.restore();
 }
-let BUFFS = [], BASE_SPD = 260, pingMs = 60, pingHist = [];
+let BUFFS = [], BASE_SPD = 260, pingMs = 60, pingHist = [], clkW = [], clockOff = null, jitEma = 0, interpMs = 100;
 let ATK = { range: 64, arc: 2.0, hRange: 78, hArc: 2.6 };
 const angD = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const easeOut = p => 1 - Math.pow(1 - p, 3);
@@ -422,7 +422,7 @@ function onMsg(m) {
       if (m.maps) MAPS_INFO = m.maps;
       break;
     case 'mapdata': setMap(m); break;
-    case 'pong': { pingHist.push(Math.max(0, performance.now() - m.c)); if (pingHist.length > 7) pingHist.shift(); const sp = pingHist.slice().sort((a, b) => a - b); pingMs = pingMs * 0.85 + sp[sp.length >> 1] * 0.15; break; }
+    case 'pong': { const pr = Math.max(0, performance.now() - m.c); pingHist.push(pr); if (pingHist.length > 7) pingHist.shift(); const sp = pingHist.slice().sort((a, b) => a - b); pingMs = pingMs * 0.85 + sp[sp.length >> 1] * 0.15; showPing(pr); break; }
     case 'joined': if (!m.solo) history.replaceState(null, '', '?r=' + m.code); break;
     case 'room': onRoom(m); break;
     case 'err': toast(m.text); break;
@@ -807,13 +807,30 @@ const fx = [];
 const snap = { t: 0, ph: 'lobby', tm: 0 };
 let prevHp = null, shake = 0, lastPhase = '';
 
+
+// 핑 표시: 부드럽게 보정한 값(pingMs)을 왼쪽 아래에 작게 표시
+let pingShowAt = 0;
+function showPing(raw) {
+  const t = performance.now(); if (t - pingShowAt < 400) return; pingShowAt = t;
+  const el = document.getElementById('pingTag'); if (!el) return;
+  const v = Math.round(pingMs);
+  el.style.display = 'block'; el.textContent = '핑 ' + v + ' ms';
+  el.style.color = v < 80 ? '#8fd19e' : v < 150 ? '#ffd36b' : '#ff7b7b';
+}
 function onSnap(m) {
   const now = performance.now();
-  if (m.ph === 'countdown' && lastPhase !== 'countdown') { for (const e of ents.values()) { e.x = e.tx; e.y = e.ty; e.vx = e.vy = 0; e.lx = e.ly = 0; e.psx = e.psy = 0; e.mh = []; e.sh = []; e.ra = e.aim; } myBuffs = {}; }
+  if (m.ph === 'countdown' && lastPhase !== 'countdown') { for (const e of ents.values()) { e.x = e.tx; e.y = e.ty; e.vx = e.vy = 0; e.lx = e.ly = 0; e.psx = e.psy = 0; e.mh = []; e.sh = []; e.ih = []; e.ra = e.aim; } myBuffs = {}; }
   if (m.ph === 'countdown') banner(String(Math.max(1, Math.ceil(m.tm / 1000))), false, 0);
   else if (m.ph === 'fight' && lastPhase === 'countdown') banner('FIGHT!', false, 800);
   lastPhase = m.ph;
   snap.t = now; snap.ph = m.ph; snap.tm = m.tm;
+  if (m.T) {
+    const d = now - m.T; clkW.push([now, d]); while (clkW.length && now - clkW[0][0] > 4000) clkW.shift();
+    let mn = Infinity; for (const w of clkW) if (w[1] < mn) mn = w[1];
+    clockOff = clockOff === null ? mn : clockOff + Math.max(-0.25, Math.min(0.25, (mn - clockOff) * 0.02));
+    jitEma = jitEma * 0.98 + Math.min(300, Math.max(0, d - clockOff)) * 0.02;
+    interpMs += Math.max(-0.2, Math.min(0.4, (Math.max(80, Math.min(220, 60 + jitEma * 2.5)) - interpMs) * 0.01));
+  }
   const seen = new Set();
   for (const a of m.p) {
     const [id, x, y, aim, hp, fl, c1, c2] = a;
@@ -835,8 +852,13 @@ function onSnap(m) {
       e.vx = (e.vx || 0) * 0.6 + ((x - ref[1]) / span) * 0.4;
       e.vy = (e.vy || 0) * 0.6 + ((y - ref[2]) / span) * 0.4;
     }
+    if (m.T && id !== myId) {
+      const ih = e.ih || (e.ih = []);
+      if (ih.length && Math.hypot(x - ih[ih.length - 1][1], y - ih[ih.length - 1][2]) > 160) ih.length = 0;   // 순간이동은 보간하지 않음
+      ih.push([m.T, x, y]); while (ih.length > 24) ih.shift();
+    }
     e.tx = x; e.ty = y; e.aim = aim; e.hp = hp;
-    e.alive = !!(fl & 1); e.shield = !!(fl & 2); e.slow = !!(fl & 4); e.dash = !!(fl & 8); e.stun = !!(fl & 16); e.parry = !!(fl & 32); e.heavy = !!(fl & 64); e.speed = !!(fl & 128); e.power = !!(fl & 256);
+    e.alive = !!(fl & 1); e.shield = !!(fl & 2); e.slow = !!(fl & 4); e.dash = !!(fl & 8); e.stun = !!(fl & 16); e.parry = !!(fl & 32); e.heavy = !!(fl & 64); e.speed = !!(fl & 128); e.power = !!(fl & 256); e.atkSlow = !!(fl & 512);
     if (!e.alive || m.ph !== 'fight' || e.dash) { e.vx = e.vy = 0; }
     e.c1 = c1; e.c2 = c2; e.ct = now;
     seen.add(id);
@@ -945,7 +967,7 @@ function addFx(ev, now) {
     case 'cast': castFx(ev, now); break;
     case 'blink': {
       const o = ents.get(ev.o);
-      if (o) { o.x = ev.x2; o.y = ev.y2; o.vx = o.vy = 0; o.lx = o.ly = 0; o.mh = []; o.sh = []; }
+      if (o) { o.x = ev.x2; o.y = ev.y2; o.vx = o.vy = 0; o.lx = o.ly = 0; o.mh = []; o.sh = []; o.ih = []; }
       const col = COLORS[slotOf(ev.o) % 4];
       for (let i = 0; i < 5; i++) fx.push({ k: 'ghost', x: ev.x1 + (ev.x2 - ev.x1) * i / 9, y: ev.y1 + (ev.y2 - ev.y1) * i / 9, col, t0: now, dur: 420 - i * 45 });
       fx.push({ k: 'beam', x: ev.x1, y: ev.y1, x2: ev.x2, y2: ev.y2, t0: now, dur: 280, c: '#c9a8ff' });
@@ -1699,15 +1721,15 @@ function frame(now) {
           e.x += (e.tx - e.x) * k; e.y += (e.ty - e.y) * k;
         } else {
           const inp = computeInput();
-          let spd = BASE_SPD * (e.slow ? 0.5 : 1) * (e.speed ? 1.45 : 1);
+          let spd = BASE_SPD * (e.slow ? 0.5 : 1) * (e.atkSlow ? 0.55 : 1) * (e.speed ? 1.45 : 1);
           // 오래 움직일 때 쌓이는 차이(공격 후 감속·핑 오차 등)는 위치를 당기지 않고, 이동 속도를 살짝 높이거나 낮춰서 자연스럽게 흡수
           {
             const ws0 = (e.ct || now) - Math.min(400, pingMs) - 15;
             let l0x = 0, l0y = 0; for (const h of mh) if (h[0] > ws0) { l0x += h[1]; l0y += h[2]; }
             const ex0 = e.tx + l0x - e.x, ey0 = e.ty + l0y - e.y, vm = Math.hypot(e.psx || 0, e.psy || 0);
             let want = 0;
-            if (vm > 30) { const proj = (ex0 * e.psx + ey0 * e.psy) / vm; want = Math.max(-0.5, Math.min(0.5, (Math.abs(proj) > 4 ? proj - Math.sign(proj) * 4 : 0) / 60)); }
-            e.adj = (e.adj || 0) + (want - (e.adj || 0)) * (1 - Math.exp(-dt * 6));
+            if (vm > 30) { const proj = (ex0 * e.psx + ey0 * e.psy) / vm; want = Math.max(-0.08, Math.min(0.08, (Math.abs(proj) > 10 ? proj - Math.sign(proj) * 10 : 0) / 400)); }
+            e.adj = (e.adj || 0) + (want - (e.adj || 0)) * (1 - Math.exp(-dt * 2));
             spd *= 1 + e.adj;
           }
           const tvx = inp.mx * spd, tvy = inp.my * spd;
@@ -1727,11 +1749,30 @@ function frame(now) {
           else if (Math.hypot(e.psx, e.psy) < 30 && !(inp.mx || inp.my)) { const kc = 1 - Math.exp(-dt * 12); e.x += ex * kc; e.y += ey * kc; }
         }
       } else {
-        // 다른 캐릭터: 최근 이동량으로 안정적으로 추정한 속도로 조금만 앞서 가며, 한 번 더 부드럽게 따라감
-        const age = Math.min(0.08, Math.max(0, (now - (e.ct || now)) / 1000));
-        const gx = e.tx + (e.vx || 0) * age, gy = e.ty + (e.vy || 0) * age;
-        const k = 1 - Math.exp(-dt * (e.dash ? 40 : 18));
-        e.x += (gx - e.x) * k; e.y += (gy - e.y) * k;
+        const ih = e.ih;
+        if (clockOff !== null && ih && ih.length >= 2) {
+          // 서버 시각 기준으로 interpMs 전 위치를 두 스냅샷 사이에서 보간 → 패킷이 몰려 와도 일정하게 부드럽게 움직임
+          const rt = performance.now() - clockOff - interpMs;
+          let px, py;
+          const last = ih[ih.length - 1];
+          if (rt <= ih[0][0]) { px = ih[0][1]; py = ih[0][2]; }
+          else if (rt >= last[0]) {
+            const pv = ih[ih.length - 2], span = Math.max(20, last[0] - pv[0]), ov = Math.min(140, rt - last[0]);
+            const vx = (last[1] - pv[1]) / span, vy = (last[2] - pv[2]) / span;
+            px = last[1] + vx * ov * (e.dash ? 0 : 1); py = last[2] + vy * ov * (e.dash ? 0 : 1);   // 패킷이 늦으면 잠깐만 이어서 이동
+          } else {
+            let i = ih.length - 1; while (i > 0 && ih[i - 1][0] > rt) i--;
+            const A = ih[i - 1], B = ih[i], f = (rt - A[0]) / Math.max(1, B[0] - A[0]);
+            px = A[1] + (B[1] - A[1]) * f; py = A[2] + (B[2] - A[2]) * f;
+          }
+          if (Math.hypot(px - e.x, py - e.y) > 200) { e.x = px; e.y = py; }
+          else { const k = 1 - Math.exp(-dt * 40); e.x += (px - e.x) * k; e.y += (py - e.y) * k; }
+        } else {
+          const age = Math.min(0.08, Math.max(0, (now - (e.ct || now)) / 1000));
+          const gx = e.tx + (e.vx || 0) * age, gy = e.ty + (e.vy || 0) * age;
+          const k = 1 - Math.exp(-dt * (e.dash ? 40 : 18));
+          e.x += (gx - e.x) * k; e.y += (gy - e.y) * k;
+        }
       }
       if (e.speed && e.alive && Math.hypot(e.vx || 0, e.vy || 0) > 60 && now - (e.trailT || 0) > 45) {
         e.trailT = now;
@@ -1783,5 +1824,9 @@ connect();
 showScreen(q ? 'menu' : 'home');
 })();
 </script>
+<style>
+#pingTag{position:fixed;left:6px;bottom:4px;z-index:60;font:600 11px/1 system-ui,sans-serif;color:#8fd19e;background:rgba(10,14,26,.55);padding:3px 6px;border-radius:6px;pointer-events:none;opacity:.8;display:none;font-variant-numeric:tabular-nums}
+</style>
+<div id="pingTag">핑 -- ms</div>
 </body>
 </html>

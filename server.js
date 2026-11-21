@@ -1090,12 +1090,13 @@ class Room {
 
   snapshot(now) {
     const s = {
+      T: now,   // 서버 시각(ms): 클라이언트가 다른 플레이어를 일정한 간격으로 보간해서 그리는 데 사용
       t: 's', ph: this.phase, tm: Math.max(0, this.phaseEnd - now),
       p: this.players.map(p => [
         p.id, Math.round(p.x), Math.round(p.y), +p.aim.toFixed(2), Math.max(0, Math.ceil(p.hp)),
         (p.alive ? 1 : 0) | (p.shieldUntil > now ? 2 : 0) | (p.slowUntil > now ? 4 : 0) | (p.dash && now < p.dash.until ? 8 : 0) |
           (p.stunUntil > now ? 16 : 0) | (p.parryUntil > now ? 32 : 0) | (p.combo >= 2 && now <= p.comboUntil ? 64 : 0) |
-          (p.speedUntil > now ? 128 : 0) | (p.powerUntil > now ? 256 : 0),
+          (p.speedUntil > now ? 128 : 0) | (p.powerUntil > now ? 256 : 0) | (p.atkSlowUntil > now ? 512 : 0),
         Math.max(0, Math.ceil(p.cd[1] - now)), Math.max(0, Math.ceil(p.cd[2] - now)),
       ]),
       b: this.projs.map(b => [Math.round(b.x), Math.round(b.y), b.r, b.kind, b.owner, Math.round(b.vx), Math.round(b.vy)]),
