@@ -797,7 +797,7 @@ function pushInput() {
   lastIn = key; lastInT = now; send(m);
 }
 setInterval(pushInput, 16);
-setInterval(() => send({ t: 'ping', c: performance.now() }), 1000);
+setInterval(() => send({ t: 'ping', c: performance.now() }), 400);
 
 // ---------- 상태 ----------
 const ents = new Map();

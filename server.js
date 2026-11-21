@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 // 현재 처리 중인 방의 맵 (Room.tick / startRound 시작 때 useMap()으로 바꿔 끼워요. 노드는 한 번에 하나씩만 처리하므로 안전해요)
 let W = 3200, H = 2000, WALLS = [], SPAWNS = [];   // 클라이언트는 1400x800 초과 시 캐릭터 추적 카메라 사용
 const PR = 18;                    // 플레이어 반지름
-const BASE_SPEED = 260;
+const BASE_SPEED = 312;   // 기존 260의 1.2배
 const MAX_HP = 100;
 const MAX_PLAYERS = 4;
 const WIN_ROUNDS = 3;             // 3라운드 선승
