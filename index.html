@@ -809,7 +809,7 @@ let prevHp = null, shake = 0, lastPhase = '';
 
 function onSnap(m) {
   const now = performance.now();
-  if (m.ph === 'countdown' && lastPhase !== 'countdown') { for (const e of ents.values()) { e.x = e.tx; e.y = e.ty; e.vx = e.vy = 0; e.lx = e.ly = 0; e.ra = e.aim; } myBuffs = {}; }
+  if (m.ph === 'countdown' && lastPhase !== 'countdown') { for (const e of ents.values()) { e.x = e.tx; e.y = e.ty; e.vx = e.vy = 0; e.lx = e.ly = 0; e.psx = e.psy = 0; e.mh = []; e.sh = []; e.ra = e.aim; } myBuffs = {}; }
   if (m.ph === 'countdown') banner(String(Math.max(1, Math.ceil(m.tm / 1000))), false, 0);
   else if (m.ph === 'fight' && lastPhase === 'countdown') banner('FIGHT!', false, 800);
   lastPhase = m.ph;
@@ -823,9 +823,17 @@ function onSnap(m) {
       fx.push({ k: 'dmg', x, y: y - 24, v: e.hp - hp, t0: now, dur: 700 }); e.hitT = now;
       if (id === myId) { shake = 7; if (navigator.vibrate) navigator.vibrate(25); }
     }
-    if (e.ct) {
-      const sdt = (now - e.ct) / 1000;
-      if (sdt > 0.005 && sdt < 0.3) { e.vx = (e.vx || 0) * 0.5 + ((x - e.tx) / sdt) * 0.5; e.vy = (e.vy || 0) * 0.5 + ((y - e.ty) / sdt) * 0.5; }
+    // 속도 추정: 스냅샷 한 개 간격(들쭉날쭉함)이 아니라 최근 약 150ms 구간의 이동량으로 계산해서 떨림을 줄임
+    const hs = e.sh || (e.sh = []);
+    if (Math.hypot(x - e.tx, y - e.ty) > 140) hs.length = 0;           // 순간이동/큰 튕김은 기록 초기화
+    hs.push([now, x, y]);
+    while (hs.length > 2 && now - hs[0][0] > 260) hs.shift();
+    let ref = null;
+    for (let i = 0; i < hs.length - 1; i++) { if (now - hs[i][0] >= 90) ref = hs[i]; else break; }
+    if (ref) {
+      const span = (now - ref[0]) / 1000;
+      e.vx = (e.vx || 0) * 0.6 + ((x - ref[1]) / span) * 0.4;
+      e.vy = (e.vy || 0) * 0.6 + ((y - ref[2]) / span) * 0.4;
     }
     e.tx = x; e.ty = y; e.aim = aim; e.hp = hp;
     e.alive = !!(fl & 1); e.shield = !!(fl & 2); e.slow = !!(fl & 4); e.dash = !!(fl & 8); e.stun = !!(fl & 16); e.parry = !!(fl & 32); e.heavy = !!(fl & 64); e.speed = !!(fl & 128); e.power = !!(fl & 256);
@@ -937,7 +945,7 @@ function addFx(ev, now) {
     case 'cast': castFx(ev, now); break;
     case 'blink': {
       const o = ents.get(ev.o);
-      if (o) { o.x = ev.x2; o.y = ev.y2; o.vx = o.vy = 0; o.lx = o.ly = 0; }
+      if (o) { o.x = ev.x2; o.y = ev.y2; o.vx = o.vy = 0; o.lx = o.ly = 0; o.mh = []; o.sh = []; }
       const col = COLORS[slotOf(ev.o) % 4];
       for (let i = 0; i < 5; i++) fx.push({ k: 'ghost', x: ev.x1 + (ev.x2 - ev.x1) * i / 9, y: ev.y1 + (ev.y2 - ev.y1) * i / 9, col, t0: now, dur: 420 - i * 45 });
       fx.push({ k: 'beam', x: ev.x1, y: ev.y1, x2: ev.x2, y2: ev.y2, t0: now, dur: 280, c: '#c9a8ff' });
@@ -1681,21 +1689,38 @@ function frame(now) {
       if (m.armed) { ctx.strokeStyle = 'rgba(255,80,80,' + (0.4 + 0.4 * Math.sin(now / 150)) + ')'; ctx.beginPath(); ctx.arc(m.x, m.y, 14, 0, 7); ctx.stroke(); }
     }
     for (const [pid, e] of ents) {
-      // 스냅샷 사이를 속도로 살짝 앞서 예측하며 부드럽게 따라감
-      const age = Math.min(0.06, Math.max(0, (now - (e.ct || now)) / 1000));
-      let gx = e.tx + (e.vx || 0) * age, gy = e.ty + (e.vy || 0) * age;
       if (pid === myId) {
-        // 내 캐릭터: 서버 응답을 기다리지 않고 입력 방향으로 바로 앞서 나감(지연 보정). 기준은 항상 서버 위치라 어긋나면 자연스럽게 따라잡아요
-        const inp = (snap.ph === 'fight' && e.alive && !e.dash && !e.stun) ? computeInput() : null;
-        const L = Math.min(0.14, Math.max(0.03, pingMs / 2000 + 0.03));
-        const spd = BASE_SPD * (e.slow ? 0.5 : 1) * (e.speed ? 1.45 : 1);
-        const kl = 1 - Math.exp(-dt * 24);
-        e.lx = (e.lx || 0) + ((inp ? inp.mx * spd * L : 0) - (e.lx || 0)) * kl;
-        e.ly = (e.ly || 0) + ((inp ? inp.my * spd * L : 0) - (e.ly || 0)) * kl;
-        const pp = { x: gx + e.lx, y: gy + e.ly }; pushOutC(pp); gx = pp.x; gy = pp.y;
+        // 내 캐릭터: 입력 즉시 로컬에서 이동(서버와 같은 가속 규칙) → 서버 위치 + 아직 서버가 반영 못 한 내 이동량과 비교해 부드럽게 보정
+        const canMove = snap.ph === 'fight' && e.alive && !e.dash && !e.stun;
+        const mh = e.mh || (e.mh = []);
+        if (!canMove) {
+          e.psx = e.psy = 0; mh.length = 0;
+          const k = 1 - Math.exp(-dt * (e.dash ? 40 : 30));
+          e.x += (e.tx - e.x) * k; e.y += (e.ty - e.y) * k;
+        } else {
+          const inp = computeInput();
+          const spd = BASE_SPD * (e.slow ? 0.5 : 1) * (e.speed ? 1.45 : 1);
+          const tvx = inp.mx * spd, tvy = inp.my * spd;
+          const kv = 1 - Math.exp(-dt * ((tvx || tvy) ? 40 : 50));
+          e.psx = (e.psx || 0) + (tvx - (e.psx || 0)) * kv; e.psy = (e.psy || 0) + (tvy - (e.psy || 0)) * kv;
+          const pp = { x: e.x + e.psx * dt, y: e.y + e.psy * dt }; pushOutC(pp);
+          mh.push([now, pp.x - e.x, pp.y - e.y]); e.x = pp.x; e.y = pp.y;
+          while (mh.length && now - mh[0][0] > 1000) mh.shift();
+          // 서버 위치(tx)는 약 핑 시간 전의 나를 보여주므로, 그 이후 내가 움직인 양을 더해 '지금 서버가 있어야 할 위치'를 계산
+          const ws = (e.ct || now) - Math.min(400, pingMs) - 15;
+          let lx = 0, ly = 0;
+          for (const h of mh) if (h[0] > ws) { lx += h[1]; ly += h[2]; }
+          const ex = e.tx + lx - e.x, ey = e.ty + ly - e.y;
+          if (Math.hypot(ex, ey) > 160) { e.x += ex; e.y += ey; mh.length = 0; }
+          else { const kc = 1 - Math.exp(-dt * 8); e.x += ex * kc; e.y += ey * kc; }
+        }
+      } else {
+        // 다른 캐릭터: 최근 이동량으로 안정적으로 추정한 속도로 조금만 앞서 가며, 한 번 더 부드럽게 따라감
+        const age = Math.min(0.08, Math.max(0, (now - (e.ct || now)) / 1000));
+        const gx = e.tx + (e.vx || 0) * age, gy = e.ty + (e.vy || 0) * age;
+        const k = 1 - Math.exp(-dt * (e.dash ? 40 : 18));
+        e.x += (gx - e.x) * k; e.y += (gy - e.y) * k;
       }
-      const k = 1 - Math.exp(-dt * (e.dash ? 40 : pid === myId ? 45 : 20));
-      e.x += (gx - e.x) * k; e.y += (gy - e.y) * k;
       if (e.speed && e.alive && Math.hypot(e.vx || 0, e.vy || 0) > 60 && now - (e.trailT || 0) > 45) {
         e.trailT = now;
         fx.push({ k: 'ghost', x: e.x, y: e.y, col: '#ffe066', t0: now, dur: 280 });
