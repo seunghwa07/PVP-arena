@@ -1711,8 +1711,10 @@ function frame(now) {
           let lx = 0, ly = 0;
           for (const h of mh) if (h[0] > ws) { lx += h[1]; ly += h[2]; }
           const ex = e.tx + lx - e.x, ey = e.ty + ly - e.y;
-          if (Math.hypot(ex, ey) > 160) { e.x += ex; e.y += ey; mh.length = 0; }
-          else { const kc = 1 - Math.exp(-dt * 8); e.x += ex * kc; e.y += ey * kc; }
+          // 작은 차이(핑 오차·공격 후 감속 등)는 무시해서 당겨지는 느낌이 없게 하고, 많이 벌어졌을 때만 아주 천천히 맞춤
+          const er = Math.hypot(ex, ey), DEAD = 45;
+          if (er > 160) { e.x += ex; e.y += ey; mh.length = 0; }
+          else if (er > DEAD) { const kc = 1 - Math.exp(-dt * 3), f = (er - DEAD) / er; e.x += ex * f * kc; e.y += ey * f * kc; }
         }
       } else {
         // 다른 캐릭터: 최근 이동량으로 안정적으로 추정한 속도로 조금만 앞서 가며, 한 번 더 부드럽게 따라감
