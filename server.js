@@ -14,6 +14,8 @@ const BASE_SPEED = 312;   // 기존 260의 1.2배
 const MAX_HP = 100;
 const MAX_PLAYERS = 4;
 const WIN_ROUNDS = 3;             // 3라운드 선승
+// 폭탄 모드(공격/수비) 설정: 시간은 ms
+const BOMB = { plant: 3200, defuse: 5000, fuse: 35000, round: 100000, win: 4, half: 3, pickR: 40, defuseR: 64 };
 
 // 기본 공격: 3연타 콤보 (3타째는 강타)
 const ATK = {
@@ -162,6 +164,79 @@ function buildTower() {
   };
 }
 
+// (3) 폭탄 모드 맵: 4개 사이트(A~D). 공격 기지(왼쪽) / 수비 기지(중앙 요새) / 양쪽 광장 / 위·아래 복도.
+//     왼쪽 위 사이트(A)와 소품을 정의하고 상하·좌우로 대칭 복제해요. 복도 폭 160 이상, 문 폭 140 이상이라 캐릭터가 편하게 지나가요.
+function buildSites() {
+  const w = 3600, h = 2400, T = 40;
+  const walls = [], rooms = [], doors = [];
+  const cut = (a, b, gaps) => {
+    const out = []; let cur = a;
+    for (const [g0, g1] of [...(gaps || [])].sort((p, q) => p[0] - q[0])) { if (g0 > cur) out.push([cur, g0]); cur = Math.max(cur, g1); }
+    if (cur < b) out.push([cur, b]);
+    return out;
+  };
+  // 방: 바깥 사각형 + 각 변의 틈(월드 좌표). 틈은 문(doors)으로도 기록
+  const room = (x, y, rw, rh, gaps, k) => {
+    gaps = gaps || {};
+    for (const [a, b] of cut(x, x + rw, gaps.N)) walls.push({ x: a, y, w: b - a, h: T });
+    for (const [a, b] of cut(x, x + rw, gaps.S)) walls.push({ x: a, y: y + rh - T, w: b - a, h: T });
+    for (const [a, b] of cut(y + T, y + rh - T, gaps.W)) walls.push({ x, y: a, w: T, h: b - a });
+    for (const [a, b] of cut(y + T, y + rh - T, gaps.E)) walls.push({ x: x + rw - T, y: a, w: T, h: b - a });
+    for (const [a, b] of gaps.N || []) doors.push({ x: a, y, w: b - a, h: T });
+    for (const [a, b] of gaps.S || []) doors.push({ x: a, y: y + rh - T, w: b - a, h: T });
+    for (const [a, b] of gaps.W || []) doors.push({ x, y: a, w: T, h: b - a });
+    for (const [a, b] of gaps.E || []) doors.push({ x: x + rw - T, y: a, w: T, h: b - a });
+    rooms.push({ x: x + T, y: y + T, w: rw - 2 * T, h: rh - 2 * T, k });
+  };
+  const mx = g => (g || []).map(([a, b]) => [w - b, w - a]);   // 좌우 반전한 틈
+  const my = g => (g || []).map(([a, b]) => [h - b, h - a]);   // 상하 반전한 틈
+  // 바깥 벽
+  walls.push({ x: 0, y: 0, w, h: T }, { x: 0, y: h - T, w, h: T }, { x: 0, y: 0, w: T, h }, { x: w - T, y: 0, w: T, h });
+  // 공격 기지(왼쪽)와 그 반대편 빈 기지(오른쪽, 옆길)
+  room(0, 880, 560, 640, { E: [[1070, 1330]] }, 3);
+  room(w - 560, 880, 560, 640, { W: [[1070, 1330]] }, 3);
+  // 중앙 요새 (수비 기지): 사방에 문
+  room(1560, 960, 480, 480, { N: [[1730, 1870]], S: [[1730, 1870]], W: [[1130, 1270]], E: [[1130, 1270]] }, 4);
+  // 사이트 방 4개 (A: 왼쪽 위, B: 왼쪽 아래, C: 오른쪽 위, D: 오른쪽 아래)
+  room(760, 0, 640, 620, { S: [[1000, 1200]], E: [[280, 440]] }, 2);
+  room(760, 1780, 640, 620, { N: [[1000, 1200]], E: my([[280, 440]]) }, 2);
+  room(w - 760 - 640, 0, 640, 620, { S: mx([[1000, 1200]]), W: [[280, 440]] }, 2);
+  room(w - 760 - 640, 1780, 640, 620, { N: mx([[1000, 1200]]), W: my([[280, 440]]) }, 2);
+  // 위·아래 복도 (사이트 방끼리 연결)
+  walls.push({ x: 1400, y: 240, w: 800, h: 40 }, { x: 1400, y: 440, w: 800, h: 40 });
+  walls.push({ x: 1400, y: h - 280, w: 800, h: 40 }, { x: 1400, y: h - 480, w: 800, h: 40 });
+  // 엄폐물: 왼쪽 위 1/4을 정의해 4방향 복제 (p:1 기둥, p:2 상자)
+  const QUAD = [
+    { x: 760, y: 780, w: 140, h: 50, p: 2 }, { x: 1060, y: 760, w: 70, h: 70, p: 1 }, { x: 1260, y: 900, w: 50, h: 150, p: 2 }, { x: 900, y: 1000, w: 60, h: 60, p: 1 },
+    { x: 910, y: 230, w: 90, h: 90, p: 2 }, { x: 1220, y: 460, w: 70, h: 70, p: 1 },            // 사이트 안 (중앙은 비워 둠)
+    { x: 1700, y: 700, w: 200, h: 50, p: 2 },                                                       // 요새 위 통로
+  ];
+  const seen = new Set();
+  for (const q of QUAD) {
+    for (const [fx, fy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      const o = { x: fx ? w - q.x - q.w : q.x, y: fy ? h - q.y - q.h : q.y, w: q.w, h: q.h, p: q.p };
+      const key = o.x + ',' + o.y + ',' + o.w + ',' + o.h;
+      if (seen.has(key)) continue; seen.add(key); walls.push(o);
+    }
+  }
+  // 사이트(폭탄 설치 구역): 중심점이 이 사각형 안에 있어야 설치할 수 있어요
+  const SW = 400, SH = 320;
+  const sites = [
+    { id: 'A', x: 880, y: 200, w: SW, h: SH },
+    { id: 'B', x: 880, y: h - 200 - SH, w: SW, h: SH },
+    { id: 'C', x: w - 880 - SW, y: 200, w: SW, h: SH },
+    { id: 'D', x: w - 880 - SW, y: h - 200 - SH, w: SW, h: SH },
+  ];
+  const atk = [[140, 1100], [140, 1300], [300, 1100], [300, 1300]];
+  const def = [[1700, 1100], [1700, 1300], [1900, 1100], [1900, 1300]];
+  return {
+    id: 'sites', name: '폭탄 작전', icon: '💣', mode: 'bomb',
+    desc: '공격은 사이트 A~D 중 한 곳에 폭탄을 설치, 수비는 막거나 해체. 중앙 요새가 수비 기지',
+    style: 'building', W: w, H: h, walls, rooms, doors, sites, atk, def, spawns: atk,
+    zone: { delay: 9999, shrink: 9999, fw: w, fh: h, dps: 0 }, pickMax: 0, nav: true,
+  };
+}
+
 // ---------- 수학 / 충돌 ----------
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const dist2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
@@ -232,12 +307,12 @@ const DIFF = {
 };
 
 // ---------- 맵 등록 / 전환 ----------
-const MAPS = { arena: buildArena(), tower: buildTower() };
-const MAP_ORDER = ['arena', 'tower'];
-const MAP_LIST = MAP_ORDER.map(id => { const m = MAPS[id]; return { id, name: m.name, icon: m.icon, desc: m.desc, W: m.W, H: m.H }; });
+const MAPS = { arena: buildArena(), tower: buildTower(), sites: buildSites() };
+const MAP_ORDER = ['arena', 'tower', 'sites'];
+const MAP_LIST = MAP_ORDER.map(id => { const m = MAPS[id]; return { id, name: m.name, icon: m.icon, desc: m.desc, W: m.W, H: m.H, mode: m.mode || 'ffa' }; });
 for (const id of MAP_ORDER) {   // 클라이언트에 보낼 맵 데이터 (한 번만 만들어 둠)
   const m = MAPS[id];
-  m.payload = JSON.stringify({ t: 'mapdata', id, style: m.style, W: m.W, H: m.H, walls: m.walls, rooms: m.rooms || [], doors: m.doors || [] });
+  m.payload = JSON.stringify({ t: 'mapdata', id, style: m.style, W: m.W, H: m.H, walls: m.walls, rooms: m.rooms || [], doors: m.doors || [], sites: m.sites || [], mode: m.mode || 'ffa' });
 }
 function useMap(m) { W = m.W; H = m.H; WALLS = m.walls; SPAWNS = m.spawns; ZONE = m.zone; }
 useMap(MAPS.arena);
@@ -428,8 +503,19 @@ class Client {
       case 'map': {
         const r = this.room;
         if (!r || r.phase !== 'lobby' || r.host !== this.id) return;
-        if (!MAPS[m.id]) return;
+        if (!MAPS[m.id] || (MAPS[m.id].mode || 'ffa') !== r.mode) return;
         r.mapId = m.id; r.map = MAPS[m.id];
+        r.sendMap();
+        r.broadcastRoom();
+        break;
+      }
+      case 'mode': {
+        const r = this.room;
+        if (!r || r.phase !== 'lobby' || r.host !== this.id) return;
+        if (!['ffa', 'bomb'].includes(m.mode) || r.mode === m.mode) return;
+        r.mode = m.mode;
+        const first = MAP_ORDER.find(id => (MAPS[id].mode || 'ffa') === r.mode);
+        r.mapId = first; r.map = MAPS[first];
         r.sendMap();
         r.broadcastRoom();
         break;
@@ -469,7 +555,7 @@ class Client {
         if (l > 1) { mx /= l; my /= l; }
         this.mx = mx; this.my = my;
         this.aim = n(m.a);
-        this.fire = !!m.f; this.s1 = !!m.s1; this.s2 = !!m.s2;
+        this.fire = !!m.f; this.s1 = !!m.s1; this.s2 = !!m.s2; this.use = !!m.u;
         break;
       }
       default: break;
@@ -523,7 +609,7 @@ class Bot {
     this.ready = true;
     this.wins = 0;
     this.slot = 0;
-    this.mx = this.my = 0; this.aim = 0; this.fire = this.s1 = this.s2 = false;
+    this.mx = this.my = 0; this.aim = 0; this.fire = this.s1 = this.s2 = false; this.use = false; this.team = 0; this.acting = 0;
     this.ai = newAi();
   }
   send() {}
@@ -538,6 +624,8 @@ function leaveRoom(c) {
   if (r.host === c.id) r.host = r.players[0].id;
   if (r.phase !== 'lobby' && r.players.length < 2) {
     r.toLobby('상대가 나가서 대기실로 돌아갑니다');
+  } else if (r.phase !== 'lobby' && r.mode === 'bomb' && (!r.players.some(p => r.side(p) === 0) || !r.players.some(p => r.side(p) === 1))) {
+    r.toLobby('한쪽 팀이 모두 나가서 대기실로 돌아갑니다');
   } else {
     r.broadcastRoom();
   }
@@ -561,6 +649,119 @@ class Room {
     this.solo = false;
     this.diff = 'normal';
     this.mapId = 'arena'; this.map = MAPS.arena;
+    this.mode = 'ffa';                       // 'ffa' = 기존 대난투, 'bomb' = 폭탄 작전(공격/수비)
+    this.swapped = 0; this.score = [0, 0];   // 폭탄 모드: 진영 교체 여부 / 팀별 승수
+    this.bomb = null; this.roundEnd = 0; this.atkSite = 0;
+  }
+  // ---------- 폭탄 모드 ----------
+  assignTeams() {
+    const ps = this.players.slice().sort((a, b) => a.slot - b.slot);
+    ps.forEach((p, i) => { p.team = i % 2; });
+  }
+  side(p) { return (p.team || 0) ^ this.swapped; }          // 0 = 공격, 1 = 수비
+  foe(a, b) { return a !== b && (this.mode !== 'bomb' || this.side(a) !== this.side(b)); }
+  siteAt(x, y) {
+    for (const s of this.map.sites || []) if (x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h) return s;
+    return null;
+  }
+  initBomb() {
+    const atk = this.players.filter(p => this.side(p) === 0);
+    const c = atk[Math.floor(Math.random() * atk.length)];
+    this.bomb = { state: 0, carrier: c ? c.id : 0, x: c ? c.x : 0, y: c ? c.y : 0, plant: 0, def: 0, fuseEnd: 0, site: -1 };
+    this.atkSite = Math.floor(Math.random() * Math.max(1, (this.map.sites || []).length));
+    for (const p of this.players) { p.acting = 0; p.use = false; }
+  }
+  endRoundBomb(winSide, text) {
+    const now = Date.now();
+    const wt = winSide === 0 ? this.swapped : this.swapped ^ 1;   // 이긴 진영 → 팀
+    this.score[wt]++;
+    for (const p of this.players) p.wins = this.score[p.team || 0];
+    if (this.score[wt] >= BOMB.win) {
+      this.phase = 'matchEnd'; this.phaseEnd = now + 6000;
+      this.broadcastRoom();
+      const names = this.players.filter(p => (p.team || 0) === wt).map(p => p.name).join(', ');
+      this.broadcastMsg('🏆 ' + names + ' 팀 최종 승리!', 'match');
+    } else {
+      this.phase = 'roundEnd'; this.phaseEnd = now + 4000;
+      this.broadcastRoom();
+      this.broadcastMsg(text + (this.round === BOMB.half ? ' · 다음 라운드부터 진영 교체' : ''), 'round');
+    }
+  }
+  tickBomb(now, dt) {
+    const B = this.bomb, ps = this.players;
+    if (!B) return;
+    // 폭탄 운반 / 떨어짐 / 줍기
+    if (B.state === 0) {
+      const c = ps.find(p => p.id === B.carrier);
+      if (c && c.alive) { B.x = c.x; B.y = c.y; }
+      else { B.state = 1; B.carrier = 0; this.ev.push({ k: 'drop', x: Math.round(B.x), y: Math.round(B.y) }); }
+    } else if (B.state === 1) {
+      for (const p of ps) {
+        if (p.alive && this.side(p) === 0 && dist2(p, B) < BOMB.pickR ** 2) { B.state = 0; B.carrier = p.id; this.ev.push({ k: 'pickup', x: Math.round(p.x), y: Math.round(p.y) }); break; }
+      }
+    }
+    // 설치(공격) / 해체(수비): 키를 누르고 있는 동안 진행, 떼면 처음부터
+    let planter = null, defusers = 0;
+    for (const p of ps) {
+      p.acting = 0;
+      if (!p.alive || !p.use || p.stunUntil > now) continue;
+      if (this.side(p) === 0) {
+        if (B.state === 0 && B.carrier === p.id) { const s = this.siteAt(p.x, p.y); if (s) { p.acting = 1; planter = { p, s }; } }
+      } else if (B.state === 2 && dist2(p, B) < BOMB.defuseR ** 2) { p.acting = 2; defusers++; }
+      if (p.acting) { p.svx = p.svy = 0; p.mx = p.my = 0; }   // 설치/해체 중에는 즉시 멈춤
+    }
+    if (B.state === 0) {
+      if (planter) {
+        B.plant += dt * 1000;
+        if (B.plant >= BOMB.plant) {
+          B.state = 2; B.x = planter.p.x; B.y = planter.p.y; B.site = this.map.sites.indexOf(planter.s);
+          B.fuseEnd = now + BOMB.fuse; B.carrier = 0; B.plant = 0; B.def = 0; planter.p.acting = 0;
+          this.ev.push({ k: 'plant', x: Math.round(B.x), y: Math.round(B.y) });
+          this.broadcastMsg('💣 폭탄 설치! 사이트 ' + planter.s.id, 'round');
+        }
+      } else B.plant = 0;
+    }
+    if (B.state === 2) {
+      if (defusers) B.def += dt * 1000; else B.def = 0;
+      if (B.def >= BOMB.defuse) {
+        B.state = 3; this.ev.push({ k: 'defused', x: Math.round(B.x), y: Math.round(B.y) });
+        return this.endRoundBomb(1, '🛡️ 폭탄 해체! 수비 팀 승리');
+      }
+      if (now >= B.fuseEnd) {
+        B.state = 4; this.ev.push({ k: 'boom', x: Math.round(B.x), y: Math.round(B.y) });
+        return this.endRoundBomb(0, '💥 폭탄 폭발! 공격 팀 승리');
+      }
+    }
+    // 전멸 / 시간 초과
+    const aa = ps.filter(p => p.alive && this.side(p) === 0).length, da = ps.filter(p => p.alive && this.side(p) === 1).length;
+    if (!da) return this.endRoundBomb(0, '⚔️ 수비 전멸! 공격 팀 승리');
+    if (B.state !== 2) {
+      if (!aa) return this.endRoundBomb(1, '🛡️ 공격 전멸! 수비 팀 승리');
+      if (now >= this.roundEnd) return this.endRoundBomb(1, '⏱ 시간 초과! 수비 팀 승리');
+    }
+  }
+  botObjective(b, now) {
+    const B = this.bomb, sites = this.map.sites || [];
+    if (!B) return null;
+    const siteC = i => { const s = sites[i]; return s ? [s.x + s.w / 2, s.y + s.h / 2] : [W / 2, H / 2]; };
+    if (this.side(b) === 0) {
+      if (B.state === 0) {
+        const c = siteC(this.atkSite);
+        if (B.carrier === b.id) {
+          if (this.siteAt(b.x, b.y) === sites[this.atkSite] && Math.hypot(b.x - c[0], b.y - c[1]) < 90) return { gx: b.x, gy: b.y, use: true };
+          return { gx: c[0], gy: c[1] };
+        }
+        return { gx: c[0] - 70, gy: c[1] + 50 };           // 운반자와 함께 사이트로
+      }
+      if (B.state === 1) return { gx: B.x, gy: B.y };      // 떨어진 폭탄 줍기
+      if (B.state === 2) { const a = (b.id * 2.3) % 6.28; return { gx: B.x + Math.cos(a) * 200, gy: B.y + Math.sin(a) * 200 }; }   // 설치 후 폭탄 지키기
+      return null;
+    }
+    if (B.state === 2) return Math.hypot(b.x - B.x, b.y - B.y) < 40 ? { gx: b.x, gy: b.y, use: true } : { gx: B.x, gy: B.y };   // 해체하러 감
+    if (b.ai.guard === undefined || now >= (b.ai.guardUntil || 0)) {
+      b.ai.guard = Math.floor(Math.random() * Math.max(1, sites.length)); b.ai.guardUntil = now + 14000 + Math.random() * 8000;
+    }
+    const c = siteC(b.ai.guard); return { gx: c[0] + 40, gy: c[1] + 60 };   // 설치 전에는 담당 사이트 지키기
   }
   add(c) {
     if (this.phase !== 'lobby') return c.send({ t: 'err', text: '이미 게임이 진행 중이에요' });
@@ -572,7 +773,7 @@ class Room {
     c.skills = randomSkills();
     c.ready = false;
     c.wins = 0;
-    c.mx = c.my = 0; c.aim = 0; c.fire = c.s1 = c.s2 = false;
+    c.mx = c.my = 0; c.aim = 0; c.fire = c.s1 = c.s2 = false; c.use = false; c.team = 0; c.acting = 0;
     this.players.push(c);
     if (this.host === null) this.host = c.id;
     c.send({ t: 'joined', code: this.code, solo: this.solo });
@@ -598,10 +799,12 @@ class Room {
   }
   broadcastRoom() {
     // 다른 사람이 고른 스킬은 보내지 않음(본인 것만 전송)
+    if (this.phase === 'lobby') this.assignTeams();
     for (const q of this.players) {
       q.send({
         t: 'room', code: this.code, host: this.host, phase: this.phase, round: this.round, solo: this.solo, diff: this.diff, map: this.mapId,
-        players: this.players.map(p => ({ id: p.id, name: p.name, av: p.av, look: p.look, bio: p.bio, th: p.th, slot: p.slot, skills: p === q ? p.skills : [], ready: p.ready, wins: p.wins, bot: !!p.isBot })),
+        mode: this.mode, score: this.score, swapped: this.swapped, win: this.mode === 'bomb' ? BOMB.win : WIN_ROUNDS,
+        players: this.players.map(p => ({ id: p.id, name: p.name, av: p.av, look: p.look, bio: p.bio, th: p.th, slot: p.slot, team: p.team || 0, side: this.mode === 'bomb' ? this.side(p) : -1, skills: p === q ? p.skills : [], ready: p.ready, wins: p.wins, bot: !!p.isBot })),
       });
     }
   }
@@ -610,6 +813,8 @@ class Room {
   }
   startMatch() {
     this.round = 1;
+    this.score = [0, 0]; this.swapped = 0;
+    this.assignTeams();
     for (const p of this.players) { p.wins = 0; }
     this.startRound();
   }
@@ -620,7 +825,11 @@ class Room {
     this.pickups = []; this.nextPickup = 0;
     this.fightAt = 0;
     this.players.forEach(p => {
-      const s = SPAWNS[p.slot % SPAWNS.length];
+      let s = SPAWNS[p.slot % SPAWNS.length];
+      if (this.mode === 'bomb') {
+        const sd = this.side(p), list = (sd === 0 ? this.map.atk : this.map.def) || SPAWNS;
+        s = list[this.players.filter(q => this.side(q) === sd).indexOf(p) % list.length];
+      }
       p.x = s[0]; p.y = s[1];
       p.hp = MAX_HP; p.alive = true;
       p.cd = [0, 0, 0];
@@ -631,8 +840,9 @@ class Room {
       p.aim = Math.atan2(H / 2 - p.y, W / 2 - p.x);
       if (p.isBot) p.ai = newAi();
     });
+    if (this.mode === 'bomb') this.initBomb(); else this.bomb = null;
     this.phase = 'countdown';
-    this.phaseEnd = Date.now() + 3000;
+    this.phaseEnd = Date.now() + (this.mode === 'bomb' ? 5000 : 3000);
     this.last = Date.now();
     this.broadcastRoom();
   }
@@ -640,8 +850,9 @@ class Room {
     this.phase = 'lobby';
     this.round = 0;
     this.projs = []; this.ev = []; this.pickups = [];
+    this.score = [0, 0]; this.swapped = 0; this.bomb = null;
     for (const p of this.players) {
-      p.ready = !!p.isBot; p.wins = 0;
+      p.ready = !!p.isBot; p.wins = 0; p.use = false; p.acting = 0;
       if (p.isBot) p.skills = randomSkills();
     }
     this.broadcastRoom();
@@ -665,7 +876,7 @@ class Room {
 
   // 현재 안전지대 [x1, y1, x2, y2]
   zone(now) {
-    if (!this.fightAt) return [0, 0, W, H];
+    if (this.mode === 'bomb' || !this.fightAt) return [0, 0, W, H];
     const k = clamp(((now - this.fightAt) / 1000 - ZONE.delay) / ZONE.shrink, 0, 1);
     const x0 = W / 2 - ZONE.fw / 2, y0 = H / 2 - ZONE.fh / 2, x1 = W / 2 + ZONE.fw / 2, y1 = H / 2 + ZONE.fh / 2;
     return [x0 * k, y0 * k, W + (x1 - W) * k, H + (y1 - H) * k];
@@ -677,21 +888,27 @@ class Room {
     this.last = now;
     this.now = now;
     if (this.phase !== 'fight') {
-      for (const p of this.players) if (p.isBot) { p.mx = p.my = 0; p.fire = p.s1 = p.s2 = false; }
+      for (const p of this.players) if (p.isBot) { p.mx = p.my = 0; p.fire = p.s1 = p.s2 = false; p.use = false; }
     }
     if (this.phase === 'countdown') {
       if (now >= this.phaseEnd) {
-        this.phase = 'fight'; this.fightAt = now; this.broadcastRoom();
+        this.phase = 'fight'; this.fightAt = now; this.roundEnd = now + BOMB.round; this.broadcastRoom();
         this.nextPickup = now + PICK.first[0] + Math.random() * (PICK.first[1] - PICK.first[0]);
       }
     } else if (this.phase === 'fight') {
       for (const p of this.players) if (p.isBot) this.botThink(p, now);
       this.simulate(now, dt, true);
-      const alive = this.players.filter(p => p.alive);
-      if (alive.length <= 1) this.endRound(alive[0] || null);
+      if (this.mode === 'bomb') this.tickBomb(now, dt);
+      else {
+        const alive = this.players.filter(p => p.alive);
+        if (alive.length <= 1) this.endRound(alive[0] || null);
+      }
     } else if (this.phase === 'roundEnd') {
       this.simulate(now, dt, false);
-      if (now >= this.phaseEnd) { this.round++; this.startRound(); }
+      if (now >= this.phaseEnd) {
+        if (this.mode === 'bomb' && this.round === BOMB.half) this.swapped ^= 1;   // 전반 종료: 진영 교체
+        this.round++; this.startRound();
+      }
     } else if (this.phase === 'matchEnd') {
       this.simulate(now, dt, false);
       if (now >= this.phaseEnd) this.toLobby();
@@ -701,8 +918,8 @@ class Room {
 
   botThink(b, now) {
     const D = DIFF[this.diff] || DIFF.normal, ai = b.ai;
-    const foes = this.players.filter(q => q !== b && q.alive);
-    if (!b.alive || !foes.length) { b.mx = b.my = 0; b.fire = b.s1 = b.s2 = false; return; }
+    const foes = this.players.filter(q => this.foe(b, q) && q.alive);
+    if (!b.alive || !foes.length) { b.mx = b.my = 0; b.fire = b.s1 = b.s2 = false; b.use = false; return; }
     // 가장 가까운 적을 목표로
     let t = foes[0], bd = dist2(b, t);
     for (const q of foes) { const d2 = dist2(b, q); if (d2 < bd) { bd = d2; t = q; } }
@@ -710,6 +927,23 @@ class Room {
     const los = !rayBlocked(b.x, b.y, t.x, t.y);
     if (now >= ai.nextThink) { ai.nextThink = now + D.think * (1 + Math.random() * 0.3); ai.err = (Math.random() * 2 - 1) * D.err; }
     if (now >= ai.sideUntil) { ai.side = Math.random() < 0.5 ? 1 : -1; ai.sideUntil = now + 1500 + Math.random() * 1500; }
+
+    // 폭탄 모드: 적이 가까이(650 이내)서 보이지 않으면 목표(설치/해체/지키기)를 수행
+    if (this.mode === 'bomb') {
+      const obj = this.botObjective(b, now);
+      if (obj && !(los && d < 650)) {
+        b.use = !!obj.use; b.fire = b.s1 = b.s2 = false;
+        if (obj.use || Math.hypot(obj.gx - b.x, obj.gy - b.y) < 45) { b.mx = b.my = 0; }
+        else {
+          const fb = Math.atan2(obj.gy - b.y, obj.gx - b.x);
+          let mv = this.map.nav ? this.navTo(b, now, obj.gx, obj.gy, fb) : fb;
+          mv = steer(b.x, b.y, mv, ai.side);
+          b.mx = Math.cos(mv); b.my = Math.sin(mv); b.aim = mv;
+        }
+        return;
+      }
+      b.use = false;
+    }
 
     // 조준 (보통 이상은 상대 이동 방향을 조금 앞서 노림)
     let tx = t.x, ty = t.y;
@@ -826,7 +1060,7 @@ class Room {
         p.x += p.dash.vx * dt; p.y += p.dash.vy * dt; p.svx = p.svy = 0;
         for (const q of ps) {
           if (!p.dash) break; // 받아치기로 돌진이 끊긴 경우
-          if (q === p || !q.alive || p.dash.hit.has(q.id)) continue;
+          if (!this.foe(p, q) || !q.alive || p.dash.hit.has(q.id)) continue;
           if (dist2(p, q) < (PR * 2 + 4) ** 2) {
             p.dash.hit.add(q.id);
             this.src = 'dash';
@@ -836,7 +1070,7 @@ class Room {
       } else {
         p.dash = null;
         let spd = BASE_SPEED * (p.slowUntil > now ? 0.5 : 1) * (p.atkSlowUntil > now ? 0.55 : 1) * (p.speedUntil > now ? PICK.speedMul : 1);
-        if (p.stunUntil > now) spd = 0;
+        if (p.stunUntil > now || p.acting) spd = 0;   // 기절 중이거나 폭탄 설치/해체 중에는 못 움직임
         const tvx = p.mx * spd, tvy = p.my * spd;
         const k = 1 - Math.exp(-dt * ((tvx || tvy) ? 40 : 50)); // 키를 누르면 거의 바로 속도가 붙고, 떼면 바로 멈춤
         p.svx = (p.svx || 0) + (tvx - (p.svx || 0)) * k;
@@ -883,7 +1117,7 @@ class Room {
       }
     }
 
-    if (canAct) this.updatePickups(now);
+    if (canAct && this.mode !== 'bomb') this.updatePickups(now);
 
     // 투사체 (단검)
     for (let i = this.projs.length - 1; i >= 0; i--) {
@@ -895,6 +1129,7 @@ class Room {
       } else {
         for (const q of ps) {
           if (!q.alive || q.id === b.owner) continue;
+          if (this.mode === 'bomb') { const o = ps.find(x => x.id === b.owner); if (o && !this.foe(o, q)) continue; }   // 아군은 통과
           if (dist2(b, q) < (b.r + PR) ** 2) {
             this.src = 'throw';
             this.damage(q, b.dmg, b.owner, { x: b.x - b.vx * 0.05, y: b.y - b.vy * 0.05, p: 120 });
@@ -946,13 +1181,13 @@ class Room {
   }
 
   act(p, now) {
-    if (p.stunUntil > now) return;
+    if (p.stunUntil > now || p.acting) return;   // 설치/해체 중에는 공격·스킬 불가
     let want = p.fire;
     if (!p.isBot) {
       // 자동 공격: 가장 가까운 적을 바라보고, 사거리 안이면 알아서 벤다
       let t = null, bd = Infinity;
       for (const q of this.players) {
-        if (q === p || !q.alive) continue;
+        if (!this.foe(p, q) || !q.alive) continue;
         const d2 = dist2(p, q);
         if (d2 < bd) { bd = d2; t = q; }
       }
@@ -987,7 +1222,7 @@ class Room {
     p.kv = { vx: dx * 240, vy: dy * 240, until: now + 110 }; // 베면서 살짝 앞으로 나감
     this.ev.push({ k: 'swing', o: p.id, x: Math.round(p.x), y: Math.round(p.y), a: +p.aim.toFixed(2), r: range + PR, arc, h: heavy ? 1 : 0 });
     for (const q of this.players) {
-      if (q === p || !q.alive) continue;
+      if (!this.foe(p, q) || !q.alive) continue;
       const d = Math.hypot(q.x - p.x, q.y - p.y);
       if (d > range + PR) continue;
       const diff = Math.abs(angDiff(Math.atan2(q.y - p.y, q.x - p.x), p.aim));
@@ -1000,7 +1235,7 @@ class Room {
   cast(p, sid, now) {
     this.src = sid;
     const dx = Math.cos(p.aim), dy = Math.sin(p.aim);
-    const enemies = this.players.filter(q => q !== p && q.alive);
+    const enemies = this.players.filter(q => this.foe(p, q) && q.alive);
     switch (sid) {
       case 'dash':
         p.dash = { vx: dx * 1500, vy: dy * 1500, until: now + 200, hit: new Set() };
@@ -1064,6 +1299,7 @@ class Room {
   }
   damage(q, dmg, ownerId, kb) {
     if (!q.alive) return false;
+    if (this.mode === 'bomb') { const o0 = this.players.find(pl => pl.id === ownerId); if (o0 && o0 !== q && !this.foe(o0, q)) return false; }   // 아군 피해 없음
     const x = Math.round(q.x), y = Math.round(q.y);
     if (q.parryUntil > this.now) {
       // 받아치기 성공: 피해 무효 + 공격자 기절
@@ -1101,13 +1337,14 @@ class Room {
         p.id, Math.round(p.x), Math.round(p.y), +p.aim.toFixed(2), Math.max(0, Math.ceil(p.hp)),
         (p.alive ? 1 : 0) | (p.shieldUntil > now ? 2 : 0) | (p.slowUntil > now ? 4 : 0) | (p.dash && now < p.dash.until ? 8 : 0) |
           (p.stunUntil > now ? 16 : 0) | (p.parryUntil > now ? 32 : 0) | (p.combo >= 2 && now <= p.comboUntil ? 64 : 0) |
-          (p.speedUntil > now ? 128 : 0) | (p.powerUntil > now ? 256 : 0) | (p.atkSlowUntil > now ? 512 : 0),
+          (p.speedUntil > now ? 128 : 0) | (p.powerUntil > now ? 256 : 0) | (p.atkSlowUntil > now ? 512 : 0) | (p.acting ? 1024 : 0),
         Math.max(0, Math.ceil(p.cd[1] - now)), Math.max(0, Math.ceil(p.cd[2] - now)),
       ]),
       b: this.projs.map(b => [Math.round(b.x), Math.round(b.y), b.r, b.kind, b.owner, Math.round(b.vx), Math.round(b.vy)]),
       m: [],
       u: this.pickups.map(u => [u.id, u.type, u.x, u.y, Math.max(0, u.expire - now)]),
       z: this.zone(now).map(Math.round),
+      bm: this.mode === 'bomb' && this.bomb ? [this.bomb.state, Math.round(this.bomb.x), Math.round(this.bomb.y), +(this.bomb.plant / BOMB.plant).toFixed(2), +(this.bomb.def / BOMB.defuse).toFixed(2), Math.max(0, Math.round(this.bomb.fuseEnd - now)), this.bomb.site, this.bomb.carrier, Math.max(0, Math.round(this.roundEnd - now))] : null,
       e: this.ev,
     };
     this.ev = [];
